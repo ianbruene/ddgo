@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -293,6 +294,250 @@ func waitForEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for event kind %q", kind)
+		}
+	}
+}
+
+func TestControllerProgramLoadStartComplete(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "demo.gcode", "(comment)\nG21\nG0 X1\nG0 Y2 ; move\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	loadEv := waitForEvent(t, controller.Events(), EventStateChanged)
+	if got, want := loadEv.State.ProgramStatus, ProgramLoaded; got != want {
+		t.Fatalf("program status = %q, want %q", got, want)
+	}
+	if got, want := loadEv.State.ProgramTotal, 3; got != want {
+		t.Fatalf("ProgramTotal = %d, want %d", got, want)
+	}
+
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	startEv := waitForEvent(t, controller.Events(), EventStateChanged)
+	if got, want := startEv.State.ProgramStatus, ProgramRunning; got != want {
+		t.Fatalf("start status = %q, want %q", got, want)
+	}
+
+	waitForWrites(t, fake, 1)
+	written := fake.Written()
+	if got, want := written[0].Display, "G21"; got != want {
+		t.Fatalf("first written display = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("<Run|MPos:0.000,0.000,0.000>")
+	rx := waitForEvent(t, controller.Events(), EventConsoleRX)
+	if got, want := rx.State.MachineState, "Run"; got != want {
+		t.Fatalf("machine state = %q, want %q", got, want)
+	}
+	if got, want := rx.State.ProgramComplete, 0; got != want {
+		t.Fatalf("ProgramComplete after status rx = %d, want %d", got, want)
+	}
+
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramRunning })
+	written = fake.Written()
+	if got, want := written[1].Display, "G0 X1"; got != want {
+		t.Fatalf("second written display = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 3)
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramRunning })
+	written = fake.Written()
+	if got, want := written[2].Display, "G0 Y2"; got != want {
+		t.Fatalf("third written display = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 3 && s.ProgramStatus == ProgramCompleted })
+	completeEv := waitForEventText(t, controller.Events(), EventStateChanged, "program demo.gcode completed")
+	if got, want := completeEv.State.ProgramStatus, ProgramCompleted; got != want {
+		t.Fatalf("complete status = %q, want %q", got, want)
+	}
+}
+
+func TestControllerProgramPauseResumeStopAndModalBlocking(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "job.gcode", "G0 X1\nG0 X2\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program job.gcode")
+	waitForWrites(t, fake, 1)
+
+	if err := controller.Jog(context.Background(), "X", 1, 100); !errors.Is(err, ErrProgramActive) {
+		t.Fatalf("Jog() during program error = %v, want %v", err, ErrProgramActive)
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+
+	if err := controller.PauseProgram(context.Background()); err != nil {
+		t.Fatalf("PauseProgram() error = %v", err)
+	}
+	pauseEv := waitForEventText(t, controller.Events(), EventStateChanged, "program paused")
+	if got, want := pauseEv.State.ProgramStatus, ProgramPaused; got != want {
+		t.Fatalf("pause status = %q, want %q", got, want)
+	}
+	waitForWrites(t, fake, 2)
+	if got, want := fake.Written()[1].Display, "!"; got != want {
+		t.Fatalf("pause write = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("ok")
+	ensureWritesStayAt(t, fake, 2, 150*time.Millisecond)
+
+	if err := controller.ResumeProgram(context.Background()); err != nil {
+		t.Fatalf("ResumeProgram() error = %v", err)
+	}
+	resumeEv := waitForEventText(t, controller.Events(), EventStateChanged, "program resumed")
+	if got, want := resumeEv.State.ProgramStatus, ProgramRunning; got != want {
+		t.Fatalf("resume status = %q, want %q", got, want)
+	}
+	waitForWrites(t, fake, 4)
+	written := fake.Written()
+	if got, want := written[2].Display, "~"; got != want {
+		t.Fatalf("resume write = %q, want %q", got, want)
+	}
+	if got, want := written[3].Display, "G0 X2"; got != want {
+		t.Fatalf("next program line = %q, want %q", got, want)
+	}
+
+	if err := controller.StopProgram(context.Background()); err != nil {
+		t.Fatalf("StopProgram() error = %v", err)
+	}
+	stopEv := waitForEventText(t, controller.Events(), EventStateChanged, "program stopped")
+	if got, want := stopEv.State.ProgramStatus, ProgramStopped; got != want {
+		t.Fatalf("stop status = %q, want %q", got, want)
+	}
+	waitForWrites(t, fake, 6)
+	written = fake.Written()
+	if got, want := written[4].Display, "!"; got != want {
+		t.Fatalf("stop hold write = %q, want %q", got, want)
+	}
+	if got, want := written[5].Display, "Ctrl-X"; got != want {
+		t.Fatalf("stop reset write = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	ensureWritesStayAt(t, fake, 6, 150*time.Millisecond)
+}
+
+func TestControllerProgramFailureAndStartValidation(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.StartProgram(context.Background()); err == nil {
+		t.Fatal("StartProgram() without load/connect error = nil, want non-nil")
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+
+	path := writeProgramFile(t, "bad.gcode", "G0 X1\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err == nil {
+		t.Fatal("StartProgram() while disconnected error = nil, want non-nil")
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program bad.gcode")
+	waitForWrites(t, fake, 1)
+
+	fake.InjectRX("error:2")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	errEv := waitForEvent(t, controller.Events(), EventError)
+	if got, want := errEv.Text, "program failed at line 1: error:2"; got != want {
+		t.Fatalf("error text = %q, want %q", got, want)
+	}
+}
+
+func writeProgramFile(t *testing.T, name string, contents string) string {
+	t.Helper()
+	path := t.TempDir() + "/" + name
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
+
+func waitForWrites(t *testing.T, fake *transport.FakeTransport, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := len(fake.Written()); got >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d writes; got %d", want, len(fake.Written()))
+}
+
+func ensureWritesStayAt(t *testing.T, fake *transport.FakeTransport, want int, dur time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(dur)
+	for time.Now().Before(deadline) {
+		if got := len(fake.Written()); got != want {
+			t.Fatalf("writes changed to %d, want %d", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForState(t *testing.T, controller *Controller, fn func(State) bool) State {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := controller.Snapshot()
+		if fn(state) {
+			return state
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	state := controller.Snapshot()
+	t.Fatalf("timed out waiting for state; last state = %+v", state)
+	return State{}
+}
+
+func waitForEventText(t *testing.T, ch <-chan Event, kind EventKind, text string) Event {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Kind == kind && ev.Text == text {
+				return ev
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for event kind %q with text %q", kind, text)
 		}
 	}
 }

@@ -9,6 +9,8 @@ import (
 
 type EventKind string
 
+type ProgramStatus string
+
 const (
 	EventStateChanged   EventKind = "state_changed"
 	EventPortsRefreshed EventKind = "ports_refreshed"
@@ -17,11 +19,35 @@ const (
 	EventError          EventKind = "error"
 )
 
+const (
+	ProgramNotLoaded ProgramStatus = "not_loaded"
+	ProgramLoaded    ProgramStatus = "loaded"
+	ProgramRunning   ProgramStatus = "running"
+	ProgramPaused    ProgramStatus = "paused"
+	ProgramStopped   ProgramStatus = "stopped"
+	ProgramCompleted ProgramStatus = "completed"
+	ProgramFailed    ProgramStatus = "failed"
+)
+
+func (s ProgramStatus) IsActive() bool {
+	switch s {
+	case ProgramRunning, ProgramPaused:
+		return true
+	default:
+		return false
+	}
+}
+
 type State struct {
-	Connected    bool
-	PortName     string
-	MachineState string
-	LastError    string
+	Connected       bool
+	PortName        string
+	MachineState    string
+	LastError       string
+	ProgramPath     string
+	ProgramName     string
+	ProgramStatus   ProgramStatus
+	ProgramTotal    int
+	ProgramComplete int
 }
 
 type Event struct {

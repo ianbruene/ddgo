@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -25,27 +26,35 @@ type Window struct {
 	commandEntry *qt.QLineEdit
 	sendButton   *qt.QPushButton
 
-	portCombo      *qt.QComboBox
-	refreshButton  *qt.QPushButton
-	connectButton  *qt.QPushButton
-	stepCombo      *qt.QComboBox
-	feedCombo      *qt.QComboBox
-	jogXPButton    *qt.QPushButton
-	jogXMButton    *qt.QPushButton
-	jogYPButton    *qt.QPushButton
-	jogYMButton    *qt.QPushButton
-	jogZPButton    *qt.QPushButton
-	jogZMButton    *qt.QPushButton
-	unlockButton   *qt.QPushButton
-	homeButton     *qt.QPushButton
-	resetButton    *qt.QPushButton
-	holdButton     *qt.QPushButton
-	resumeButton   *qt.QPushButton
-	statusButton   *qt.QPushButton
-	connStatus     *qt.QLabel
-	machineStatus  *qt.QLabel
-	lastErrorLabel *qt.QLabel
-	pollTimer      *qt.QTimer
+	portCombo       *qt.QComboBox
+	refreshButton   *qt.QPushButton
+	connectButton   *qt.QPushButton
+	programPath     *qt.QLineEdit
+	loadButton      *qt.QPushButton
+	runButton       *qt.QPushButton
+	pauseButton     *qt.QPushButton
+	resumeButton    *qt.QPushButton
+	stopButton      *qt.QPushButton
+	stepCombo       *qt.QComboBox
+	feedCombo       *qt.QComboBox
+	jogXPButton     *qt.QPushButton
+	jogXMButton     *qt.QPushButton
+	jogYPButton     *qt.QPushButton
+	jogYMButton     *qt.QPushButton
+	jogZPButton     *qt.QPushButton
+	jogZMButton     *qt.QPushButton
+	unlockButton    *qt.QPushButton
+	homeButton      *qt.QPushButton
+	resetButton     *qt.QPushButton
+	holdButton      *qt.QPushButton
+	resumeActBtn    *qt.QPushButton
+	statusButton    *qt.QPushButton
+	connStatus      *qt.QLabel
+	machineStatus   *qt.QLabel
+	programStatus   *qt.QLabel
+	programProgress *qt.QLabel
+	lastErrorLabel  *qt.QLabel
+	pollTimer       *qt.QTimer
 }
 
 func Run(controller *app.Controller) error {
@@ -68,7 +77,7 @@ func newWindow(controller *app.Controller) *Window {
 func (w *Window) build() {
 	w.window = qt.NewQMainWindow(nil)
 	w.window.SetWindowTitle("CNC UI")
-	w.window.Resize(1100, 700)
+	w.window.Resize(1180, 760)
 
 	central := qt.NewQWidget(nil)
 	central.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
@@ -90,34 +99,41 @@ func (w *Window) build() {
 	w.commandEntry.SetPlaceholderText("Enter GRBL command, e.g. G0 X10")
 	commandRow.Layout().AddWidget(w.commandEntry.QWidget)
 
-	w.sendButton = qt.NewQPushButton(nil)
-	w.sendButton.SetText("Send")
+	w.sendButton = button("Send")
 	commandRow.Layout().AddWidget(w.sendButton.QWidget)
 
 	right := qt.NewQWidget(nil)
 	right.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
 	central.Layout().AddWidget(right)
 
-	connectionGroup := qt.NewQGroupBox(nil)
-	connectionGroup.SetTitle("Connection")
-	connectionGroup.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
+	connectionGroup := groupBox("Connection")
 	right.Layout().AddWidget(connectionGroup.QWidget)
-
 	w.portCombo = qt.NewQComboBox(nil)
 	connectionGroup.Layout().AddWidget(label("Port").QWidget)
 	connectionGroup.Layout().AddWidget(w.portCombo.QWidget)
-
-	w.refreshButton = qt.NewQPushButton(nil)
-	w.refreshButton.SetText("Refresh Ports")
+	w.refreshButton = button("Refresh Ports")
 	connectionGroup.Layout().AddWidget(w.refreshButton.QWidget)
-
-	w.connectButton = qt.NewQPushButton(nil)
-	w.connectButton.SetText("Connect")
+	w.connectButton = button("Connect")
 	connectionGroup.Layout().AddWidget(w.connectButton.QWidget)
 
-	jogGroup := qt.NewQGroupBox(nil)
-	jogGroup.SetTitle("Jog")
-	jogGroup.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
+	programGroup := groupBox("Program")
+	right.Layout().AddWidget(programGroup.QWidget)
+	programGroup.Layout().AddWidget(label("G-code file path").QWidget)
+	w.programPath = qt.NewQLineEdit(nil)
+	w.programPath.SetPlaceholderText("/path/to/file.gcode")
+	programGroup.Layout().AddWidget(w.programPath.QWidget)
+	w.loadButton = button("Load Program")
+	programGroup.Layout().AddWidget(w.loadButton.QWidget)
+	w.runButton = button("Run")
+	programGroup.Layout().AddWidget(w.runButton.QWidget)
+	w.pauseButton = button("Pause")
+	programGroup.Layout().AddWidget(w.pauseButton.QWidget)
+	w.resumeButton = button("Resume")
+	programGroup.Layout().AddWidget(w.resumeButton.QWidget)
+	w.stopButton = button("Stop")
+	programGroup.Layout().AddWidget(w.stopButton.QWidget)
+
+	jogGroup := groupBox("Jog")
 	right.Layout().AddWidget(jogGroup.QWidget)
 
 	rowY := qt.NewQWidget(nil)
@@ -158,32 +174,28 @@ func (w *Window) build() {
 	w.feedCombo.SetCurrentText("500")
 	jogGroup.Layout().AddWidget(w.feedCombo.QWidget)
 
-	actionsGroup := qt.NewQGroupBox(nil)
-	actionsGroup.SetTitle("Machine Actions")
-	actionsGroup.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
+	actionsGroup := groupBox("Machine Actions")
 	right.Layout().AddWidget(actionsGroup.QWidget)
-
 	w.unlockButton = button("Unlock")
 	w.homeButton = button("Home")
 	w.resetButton = button("Soft Reset")
 	w.holdButton = button("Hold")
-	w.resumeButton = button("Resume")
+	w.resumeActBtn = button("Resume")
 	w.statusButton = button("Status")
-	for _, btn := range []*qt.QPushButton{w.unlockButton, w.homeButton, w.resetButton, w.holdButton, w.resumeButton, w.statusButton} {
+	for _, btn := range []*qt.QPushButton{w.unlockButton, w.homeButton, w.resetButton, w.holdButton, w.resumeActBtn, w.statusButton} {
 		actionsGroup.Layout().AddWidget(btn.QWidget)
 	}
 
-	statusGroup := qt.NewQGroupBox(nil)
-	statusGroup.SetTitle("Status")
-	statusGroup.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
+	statusGroup := groupBox("Status")
 	right.Layout().AddWidget(statusGroup.QWidget)
-
 	w.connStatus = qt.NewQLabel(nil)
 	w.machineStatus = qt.NewQLabel(nil)
+	w.programStatus = qt.NewQLabel(nil)
+	w.programProgress = qt.NewQLabel(nil)
 	w.lastErrorLabel = qt.NewQLabel(nil)
-	statusGroup.Layout().AddWidget(w.connStatus.QWidget)
-	statusGroup.Layout().AddWidget(w.machineStatus.QWidget)
-	statusGroup.Layout().AddWidget(w.lastErrorLabel.QWidget)
+	for _, lbl := range []*qt.QLabel{w.connStatus, w.machineStatus, w.programStatus, w.programProgress, w.lastErrorLabel} {
+		statusGroup.Layout().AddWidget(lbl.QWidget)
+	}
 
 	w.pollTimer = qt.NewQTimer()
 	w.pollTimer.OnTimeout(func() { w.drainEvents() })
@@ -197,6 +209,12 @@ func (w *Window) bind() {
 		go func() { _ = w.controller.RefreshPorts(context.Background()) }()
 	})
 	w.connectButton.OnClicked(func() { w.toggleConnection() })
+	w.loadButton.OnClicked(func() { w.loadProgram() })
+	w.programPath.OnReturnPressed(func() { w.loadProgram() })
+	w.runButton.OnClicked(func() { w.startProgram() })
+	w.pauseButton.OnClicked(func() { go func() { _ = w.controller.PauseProgram(context.Background()) }() })
+	w.resumeButton.OnClicked(func() { go func() { _ = w.controller.ResumeProgram(context.Background()) }() })
+	w.stopButton.OnClicked(func() { go func() { _ = w.controller.StopProgram(context.Background()) }() })
 	w.jogXPButton.OnClicked(func() { w.jog("X", +1) })
 	w.jogXMButton.OnClicked(func() { w.jog("X", -1) })
 	w.jogYPButton.OnClicked(func() { w.jog("Y", +1) })
@@ -207,7 +225,7 @@ func (w *Window) bind() {
 	w.homeButton.OnClicked(func() { w.action(grbl.ActionHome) })
 	w.resetButton.OnClicked(func() { w.action(grbl.ActionSoftReset) })
 	w.holdButton.OnClicked(func() { w.action(grbl.ActionHold) })
-	w.resumeButton.OnClicked(func() { w.action(grbl.ActionResume) })
+	w.resumeActBtn.OnClicked(func() { w.action(grbl.ActionResume) })
 	w.statusButton.OnClicked(func() { w.action(grbl.ActionStatus) })
 }
 
@@ -219,6 +237,21 @@ func (w *Window) toggleConnection() {
 	}
 	cfg := transport.DefaultPortConfig(strings.TrimSpace(w.portCombo.CurrentText()))
 	go func() { _ = w.controller.Connect(context.Background(), cfg) }()
+}
+
+func (w *Window) loadProgram() {
+	path := strings.TrimSpace(w.programPath.Text())
+	if path == "" {
+		w.appendConsole("ERR", "program path is required")
+		return
+	}
+	path = filepath.Clean(path)
+	w.programPath.SetText(path)
+	go func() { _ = w.controller.LoadProgramFile(path) }()
+}
+
+func (w *Window) startProgram() {
+	go func() { _ = w.controller.StartProgram(context.Background()) }()
 }
 
 func (w *Window) sendCommand() {
@@ -302,22 +335,65 @@ func (w *Window) applyState(state app.State) {
 		machine = "unknown"
 	}
 	w.machineStatus.SetText("Machine: " + machine)
+	if state.ProgramPath != "" && strings.TrimSpace(w.programPath.Text()) == "" {
+		w.programPath.SetText(state.ProgramPath)
+	}
+	w.programStatus.SetText("Program: " + formatProgramStatus(state))
+	w.programProgress.SetText(fmt.Sprintf("Progress: %d / %d", state.ProgramComplete, state.ProgramTotal))
 	if state.LastError != "" {
 		w.lastErrorLabel.SetText("Last error: " + state.LastError)
 	} else {
 		w.lastErrorLabel.SetText("Last error: none")
 	}
 
-	enabled := state.Connected
-	w.sendButton.SetEnabled(enabled)
-	w.commandEntry.SetEnabled(enabled)
-	for _, btn := range []*qt.QPushButton{w.jogXPButton, w.jogXMButton, w.jogYPButton, w.jogYMButton, w.jogZPButton, w.jogZMButton, w.unlockButton, w.homeButton, w.resetButton, w.holdButton, w.resumeButton, w.statusButton} {
-		btn.SetEnabled(enabled)
+	programActive := state.ProgramStatus.IsActive()
+	connected := state.Connected
+	loaded := state.ProgramTotal > 0
+	canManual := connected && !programActive
+	canRun := connected && loaded && !programActive
+
+	w.refreshButton.SetEnabled(!programActive)
+	w.connectButton.SetEnabled(!programActive)
+	w.portCombo.SetEnabled(!programActive)
+	w.programPath.SetEnabled(!programActive)
+	w.loadButton.SetEnabled(!programActive)
+	w.runButton.SetEnabled(canRun)
+	w.pauseButton.SetEnabled(state.ProgramStatus == app.ProgramRunning)
+	w.resumeButton.SetEnabled(state.ProgramStatus == app.ProgramPaused)
+	w.stopButton.SetEnabled(programActive)
+
+	w.sendButton.SetEnabled(canManual)
+	w.commandEntry.SetEnabled(canManual)
+	w.stepCombo.SetEnabled(canManual)
+	w.feedCombo.SetEnabled(canManual)
+	for _, btn := range []*qt.QPushButton{w.jogXPButton, w.jogXMButton, w.jogYPButton, w.jogYMButton, w.jogZPButton, w.jogZMButton, w.unlockButton, w.homeButton, w.resetButton, w.holdButton, w.resumeActBtn, w.statusButton} {
+		btn.SetEnabled(canManual)
 	}
 }
 
 func (w *Window) appendConsole(prefix string, text string) {
 	w.console.AppendPlainText(fmt.Sprintf("[%s] %s", prefix, text))
+}
+
+func formatProgramStatus(state app.State) string {
+	switch state.ProgramStatus {
+	case app.ProgramNotLoaded:
+		return "not loaded"
+	case app.ProgramLoaded:
+		return fmt.Sprintf("loaded (%s)", state.ProgramName)
+	case app.ProgramRunning:
+		return fmt.Sprintf("running (%s)", state.ProgramName)
+	case app.ProgramPaused:
+		return fmt.Sprintf("paused (%s)", state.ProgramName)
+	case app.ProgramStopped:
+		return fmt.Sprintf("stopped (%s)", state.ProgramName)
+	case app.ProgramCompleted:
+		return fmt.Sprintf("completed (%s)", state.ProgramName)
+	case app.ProgramFailed:
+		return fmt.Sprintf("failed (%s)", state.ProgramName)
+	default:
+		return string(state.ProgramStatus)
+	}
 }
 
 func label(text string) *qt.QLabel {
@@ -330,6 +406,13 @@ func button(text string) *qt.QPushButton {
 	b := qt.NewQPushButton(nil)
 	b.SetText(text)
 	return b
+}
+
+func groupBox(title string) *qt.QGroupBox {
+	g := qt.NewQGroupBox(nil)
+	g.SetTitle(title)
+	g.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
+	return g
 }
 
 func spacer() *qt.QWidget {
