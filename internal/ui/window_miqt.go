@@ -30,7 +30,7 @@ type Window struct {
 	refreshButton   *qt.QPushButton
 	connectButton   *qt.QPushButton
 	programPath     *qt.QLineEdit
-	loadButton      *qt.QPushButton
+	browseButton    *qt.QPushButton
 	runButton       *qt.QPushButton
 	pauseButton     *qt.QPushButton
 	resumeButton    *qt.QPushButton
@@ -118,12 +118,16 @@ func (w *Window) build() {
 
 	programGroup := groupBox("Program")
 	right.Layout().AddWidget(programGroup.QWidget)
-	programGroup.Layout().AddWidget(label("G-code file path").QWidget)
+	programGroup.Layout().AddWidget(label("G-code file").QWidget)
+	pathRow := qt.NewQWidget(nil)
+	pathRow.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
+	programGroup.Layout().AddWidget(pathRow)
 	w.programPath = qt.NewQLineEdit(nil)
-	w.programPath.SetPlaceholderText("/path/to/file.gcode")
-	programGroup.Layout().AddWidget(w.programPath.QWidget)
-	w.loadButton = button("Load Program")
-	programGroup.Layout().AddWidget(w.loadButton.QWidget)
+	w.programPath.SetPlaceholderText("No program selected")
+	w.programPath.SetReadOnly(true)
+	pathRow.Layout().AddWidget(w.programPath.QWidget)
+	w.browseButton = button("Open…")
+	pathRow.Layout().AddWidget(w.browseButton.QWidget)
 	w.runButton = button("Run")
 	programGroup.Layout().AddWidget(w.runButton.QWidget)
 	w.pauseButton = button("Pause")
@@ -209,8 +213,7 @@ func (w *Window) bind() {
 		go func() { _ = w.controller.RefreshPorts(context.Background()) }()
 	})
 	w.connectButton.OnClicked(func() { w.toggleConnection() })
-	w.loadButton.OnClicked(func() { w.loadProgram() })
-	w.programPath.OnReturnPressed(func() { w.loadProgram() })
+	w.browseButton.OnClicked(func() { w.browseAndLoadProgram() })
 	w.runButton.OnClicked(func() { w.startProgram() })
 	w.pauseButton.OnClicked(func() { go func() { _ = w.controller.PauseProgram(context.Background()) }() })
 	w.resumeButton.OnClicked(func() { go func() { _ = w.controller.ResumeProgram(context.Background()) }() })
@@ -239,13 +242,20 @@ func (w *Window) toggleConnection() {
 	go func() { _ = w.controller.Connect(context.Background(), cfg) }()
 }
 
-func (w *Window) loadProgram() {
-	path := strings.TrimSpace(w.programPath.Text())
-	if path == "" {
-		w.appendConsole("ERR", "program path is required")
+func (w *Window) browseAndLoadProgram() {
+	dialog := qt.NewQFileDialog(w.window.QWidget)
+	dialog.SetWindowTitle("Open G-code Program")
+	dialog.SetFileMode(qt.QFileDialog__ExistingFile)
+	dialog.SetNameFilter("G-code Files (*.gcode *.gc *.nc *.tap *.ngc);;All Files (*)")
+	dialog.Exec()
+	files := dialog.SelectedFiles()
+	if len(files) == 0 {
 		return
 	}
-	path = filepath.Clean(path)
+	path := filepath.Clean(strings.TrimSpace(files[0]))
+	if path == "" {
+		return
+	}
 	w.programPath.SetText(path)
 	go func() { _ = w.controller.LoadProgramFile(path) }()
 }
@@ -356,7 +366,7 @@ func (w *Window) applyState(state app.State) {
 	w.connectButton.SetEnabled(!programActive)
 	w.portCombo.SetEnabled(!programActive)
 	w.programPath.SetEnabled(!programActive)
-	w.loadButton.SetEnabled(!programActive)
+	w.browseButton.SetEnabled(!programActive)
 	w.runButton.SetEnabled(canRun)
 	w.pauseButton.SetEnabled(state.ProgramStatus == app.ProgramRunning)
 	w.resumeButton.SetEnabled(state.ProgramStatus == app.ProgramPaused)
