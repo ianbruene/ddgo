@@ -21,4 +21,7 @@ func TestSerialTransportStub(t *testing.T) {
 	if err := tpt.Close(); err != nil {
 		t.Fatalf("Close() error = %v, want nil", err)
 	}
+	if tpt.Events() == nil {
+		t.Fatal("Events() = nil, want non-nil channel")
+	}
 }

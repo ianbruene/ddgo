@@ -10,9 +10,13 @@ import (
 	"example.com/cncui/internal/ui"
 )
 
-func main() {
+func run(uiRunner func(*app.Controller) error) error {
 	controller := app.NewController(transport.NewSerialTransport(), ports.ListPorts)
-	if err := ui.Run(controller); err != nil {
+	return uiRunner(controller)
+}
+
+func main() {
+	if err := run(ui.Run); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

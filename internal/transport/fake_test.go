@@ -90,6 +90,22 @@ func TestFakeTransport_ConfiguredErrors(t *testing.T) {
 	}
 }
 
+func TestFakeTransport_InjectError(t *testing.T) {
+	t.Parallel()
+
+	f := NewFakeTransport()
+	wantErr := errors.New("injected fault")
+	f.InjectError(wantErr)
+
+	ev := waitForTransportEvent(t, f.Events(), EventError)
+	if !errors.Is(ev.Err, wantErr) {
+		t.Fatalf("error event Err = %v, want %v", ev.Err, wantErr)
+	}
+	if got, want := ev.Text, wantErr.Error(); got != want {
+		t.Fatalf("error event Text = %q, want %q", got, want)
+	}
+}
+
 func waitForTransportEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
