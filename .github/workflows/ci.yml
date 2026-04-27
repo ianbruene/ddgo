@@ -27,6 +27,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Verify formatting
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           unformatted="$(gofmt -l .)"
@@ -37,13 +38,10 @@ jobs:
           fi
 
       - name: Vet
-        shell: bash
         run: go vet ./...
 
       - name: Test
-        shell: bash
         run: go test ./...
 
       - name: Build
-        shell: bash
         run: go build ./...
