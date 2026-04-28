@@ -14,6 +14,8 @@ import (
 	"go.bug.st/serial"
 )
 
+const serialArduinoBaudRate = 115200
+
 type SerialTransport struct {
 	mu      sync.Mutex
 	port    serial.Port
@@ -37,8 +39,8 @@ func (t *SerialTransport) Open(_ context.Context, cfg PortConfig) error {
 		return errors.New("serial port already open")
 	}
 	mode := &serial.Mode{
-		BaudRate: cfg.BaudRate,
-		DataBits: firstNonZero(cfg.DataBits, 8),
+		BaudRate: serialArduinoBaudRate,
+		DataBits: 8,
 		StopBits: serial.OneStopBit,
 		Parity:   serial.NoParity,
 	}
@@ -138,11 +140,4 @@ func (t *SerialTransport) consume(chunk []byte) {
 			_ = t.readBuf.WriteByte(b)
 		}
 	}
-}
-
-func firstNonZero(v int, fallback int) int {
-	if v != 0 {
-		return v
-	}
-	return fallback
 }

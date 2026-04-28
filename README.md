@@ -24,7 +24,7 @@ The connection pane now contains just:
 - refresh ports button
 - connect / disconnect button
 
-The baud selector has been removed from the UI. The application now uses a single default serial configuration from `transport.DefaultPortConfig(...)`, which keeps transport defaults in one place and keeps the UI focused on operator actions.
+This keeps connection controls focused only on selecting a USB port and connecting.
 
 ## Simpler port discovery seam
 

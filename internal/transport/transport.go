@@ -9,23 +9,13 @@ import (
 
 var ErrNotOpen = errors.New("transport is not open")
 
-const DefaultBaudRate = 115200
-
 type PortConfig struct {
-	Name     string
-	BaudRate int
-	DataBits int
-	StopBits int
-	Parity   string
+	Name string
 }
 
 func DefaultPortConfig(name string) PortConfig {
 	return PortConfig{
-		Name:     name,
-		BaudRate: DefaultBaudRate,
-		DataBits: 8,
-		StopBits: 1,
-		Parity:   "N",
+		Name: name,
 	}
 }
 
