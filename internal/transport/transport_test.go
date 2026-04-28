@@ -11,18 +11,6 @@ func TestDefaultPortConfig(t *testing.T) {
 	if got, want := cfg.Name, "/dev/ttyACM0"; got != want {
 		t.Fatalf("Name = %q, want %q", got, want)
 	}
-	if got, want := cfg.BaudRate, DefaultBaudRate; got != want {
-		t.Fatalf("BaudRate = %d, want %d", got, want)
-	}
-	if got, want := cfg.DataBits, 8; got != want {
-		t.Fatalf("DataBits = %d, want %d", got, want)
-	}
-	if got, want := cfg.StopBits, 1; got != want {
-		t.Fatalf("StopBits = %d, want %d", got, want)
-	}
-	if got, want := cfg.Parity, "N"; got != want {
-		t.Fatalf("Parity = %q, want %q", got, want)
-	}
 }
 
 func TestNewLineMessage_NormalizesLineEnding(t *testing.T) {

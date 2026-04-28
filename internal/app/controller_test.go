@@ -132,19 +132,11 @@ func TestControllerConnectValidationAndOpenError(t *testing.T) {
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
 
-	if err := controller.Connect(context.Background(), transport.PortConfig{BaudRate: transport.DefaultBaudRate}); err == nil {
+	if err := controller.Connect(context.Background(), transport.PortConfig{}); err == nil {
 		t.Fatal("Connect() with empty port name error = nil, want non-nil")
 	}
 	ev := waitForEvent(t, controller.Events(), EventError)
 	if got, want := ev.Text, "port name is required"; got != want {
-		t.Fatalf("error text = %q, want %q", got, want)
-	}
-
-	if err := controller.Connect(context.Background(), transport.PortConfig{Name: "/dev/ttyACM0", BaudRate: 0}); err == nil {
-		t.Fatal("Connect() with invalid baud error = nil, want non-nil")
-	}
-	ev = waitForEvent(t, controller.Events(), EventError)
-	if got, want := ev.Text, "baud rate must be greater than zero"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
 

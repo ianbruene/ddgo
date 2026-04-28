@@ -74,11 +74,6 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		c.emitError(err)
 		return err
 	}
-	if cfg.BaudRate <= 0 {
-		err := errors.New("baud rate must be greater than zero")
-		c.emitError(err)
-		return err
-	}
 	if c.Snapshot().ProgramStatus.IsActive() {
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
