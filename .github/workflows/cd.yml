@@ -37,12 +37,48 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Build release binary
+      - name: Install Linux build dependencies
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config qtbase5-dev
+
+      - name: Install macOS build dependencies
+        if: matrix.goos == 'darwin'
+        run: |
+          brew update
+          brew install qt@5 pkg-config
+
+      - name: Set up MSYS2 (Windows Qt + MinGW toolchain)
+        if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-qt5
+            mingw-w64-x86_64-pkgconf
+          msystem: MINGW64
+
+      - name: Build release binary (Linux/macOS)
+        if: matrix.goos != 'windows'
         shell: bash
         run: |
           mkdir -p dist
           output="dist/cncui-${{ matrix.goos }}-amd64${{ matrix.ext }}"
-          GOOS="${{ matrix.goos }}" GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$output" ./cmd/cncui
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH}"
+          fi
+
+          GOOS="${{ matrix.goos }}" GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags='-s -w' -o "$output" ./cmd/cncui
+
+      - name: Build release binary (Windows)
+        if: matrix.goos == 'windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p dist
+          output="dist/cncui-${{ matrix.goos }}-amd64${{ matrix.ext }}"
+          export PATH="/mingw64/bin:$PATH"
+          export CC=x86_64-w64-mingw32-gcc
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags='-s -w' -o "$output" ./cmd/cncui
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
