@@ -72,11 +72,11 @@ jobs:
 
       - name: Build release binary (Windows)
         if: matrix.goos == 'windows'
-        shell: msys2 {0}
+        shell: bash
         run: |
           mkdir -p dist
           output="dist/cncui-${{ matrix.goos }}-amd64${{ matrix.ext }}"
-          export PATH="/mingw64/bin:$PATH"
+          export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
           export CC=x86_64-w64-mingw32-gcc
           GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags='-s -w' -o "$output" ./cmd/cncui
 
