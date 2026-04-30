@@ -57,6 +57,7 @@ jobs:
             mingw-w64-x86_64-qt5
             mingw-w64-x86_64-pkgconf
           msystem: MINGW64
+          path-type: inherit
 
       - name: Build release binary (Linux/macOS)
         if: matrix.goos != 'windows'
@@ -76,6 +77,8 @@ jobs:
         run: |
           mkdir -p dist
           output="dist/cncui-${{ matrix.goos }}-amd64${{ matrix.ext }}"
+          echo "PATH=$PATH"
+          echo "go binary: $(command -v go || true)"
           echo "go version: $(go version)"
           echo "gcc version: $(gcc --version | head -n1)"
           echo "pkg-config Qt5Core: $(pkg-config --modversion Qt5Core)"
