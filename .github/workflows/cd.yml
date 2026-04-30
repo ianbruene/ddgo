@@ -12,18 +12,26 @@ permissions:
 
 jobs:
   build-artifacts:
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             goos: linux
-            ext: ""
-          - os: macos-latest
-            goos: darwin
+            goarch: amd64
             ext: ""
           - os: windows-latest
             goos: windows
+            goarch: amd64
             ext: ".exe"
+          - os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: ""
 
     runs-on: ${{ matrix.os }}
 
@@ -59,37 +67,59 @@ jobs:
           msystem: MINGW64
           path-type: inherit
 
+      - name: macOS diagnostics
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          uname -a
+          uname -m
+          go env GOOS GOARCH CGO_ENABLED
+          brew --prefix qt@5
+          file "$(brew --prefix qt@5)/lib/libQt5Core.dylib" || true
+          pkg-config --modversion Qt5Core || true
+
+      - name: Download Go dependencies
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          go env -w GOPROXY=https://proxy.golang.org,direct
+          go mod download -x
+
       - name: Build release binary (Linux/macOS)
         if: matrix.goos != 'windows'
+        timeout-minutes: 20
         shell: bash
         run: |
           mkdir -p dist
-          output="dist/cncui-${{ matrix.goos }}-amd64${{ matrix.ext }}"
+          output="dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+
           if [ "${{ matrix.goos }}" = "darwin" ]; then
-            export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH}"
+            export PATH="$(brew --prefix qt@5)/bin:$PATH"
+            export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:$PKG_CONFIG_PATH"
           fi
 
-          GOOS="${{ matrix.goos }}" GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags='-s -w' -o "$output" ./cmd/cncui
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/cncui
 
       - name: Build release binary (Windows)
         if: matrix.goos == 'windows'
+        timeout-minutes: 20
         shell: msys2 {0}
         run: |
           mkdir -p dist
-          output="dist/cncui-${{ matrix.goos }}-amd64${{ matrix.ext }}"
+          output="dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           echo "PATH=$PATH"
           echo "go binary: $(command -v go || true)"
           echo "go version: $(go version)"
           echo "gcc version: $(gcc --version | head -n1)"
           echo "pkg-config Qt5Core: $(pkg-config --modversion Qt5Core)"
           export CC=gcc
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags='-s -w' -o "$output" ./cmd/cncui
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/cncui
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cncui-${{ matrix.goos }}-amd64
-          path: dist/*
+          name: cncui-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
