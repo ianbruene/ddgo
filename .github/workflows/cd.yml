@@ -43,7 +43,26 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+
+      - name: Capture Go cache paths
+        id: go-cache-paths
+        shell: bash
+        run: |
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Go build caches
+        id: go-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: cd-go-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
+          restore-keys: |
+            cd-go-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-
+            cd-go-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-
 
       - name: Install Linux build dependencies
         if: matrix.goos == 'linux'
@@ -62,7 +81,7 @@ jobs:
           update: true
           install: >-
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-qt5
+            mingw-w64-x86_64-qt5-base
             mingw-w64-x86_64-pkgconf
           msystem: MINGW64
           path-type: inherit
@@ -100,9 +119,17 @@ jobs:
 
           GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/cncui
 
+      - name: Warm MIQT build cache (Windows)
+        if: matrix.goos == 'windows'
+        timeout-minutes: 45
+        shell: msys2 {0}
+        run: |
+          export CC=gcc
+          go install -v github.com/mappu/miqt/qt
+
       - name: Build release binary (Windows)
         if: matrix.goos == 'windows'
-        timeout-minutes: 20
+        timeout-minutes: 60
         shell: msys2 {0}
         run: |
           mkdir -p dist
@@ -114,6 +141,15 @@ jobs:
           echo "pkg-config Qt5Core: $(pkg-config --modversion Qt5Core)"
           export CC=gcc
           GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/cncui
+
+      - name: Save Go build caches
+        if: success() && steps.go-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ steps.go-cache-paths.outputs.gomodcache }}
+            ${{ steps.go-cache-paths.outputs.gocache }}
+          key: ${{ steps.go-cache-restore.outputs.cache-primary-key }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
