@@ -14,6 +14,7 @@ jobs:
   build-artifacts:
     timeout-minutes: 90
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -154,6 +155,7 @@ jobs:
   build-macos-universal:
     needs: build-artifacts
     runs-on: macos-latest
+    timeout-minutes: 10
 
     steps:
       - name: Download macOS Intel artifact
@@ -179,7 +181,9 @@ jobs:
       - name: Verify universal binary
         shell: bash
         run: |
-          lipo -archs dist/cncui-darwin-universal
+          archs="$(lipo -archs dist/cncui-darwin-universal)"
+          echo "$archs"
+          [[ "$archs" == *"x86_64"* && "$archs" == *"arm64"* ]]
           file dist/cncui-darwin-universal
 
       - name: Upload universal artifact
