@@ -311,7 +311,7 @@ jobs:
           arm_app="work/arm64/DDGo.app"
           out_app="dist/DDGo.app"
 
-          cp -R "$arm_app" "$out_app"
+          ditto "$arm_app" "$out_app"
 
           while IFS= read -r -d '' arm_file; do
             rel="${arm_file#${arm_app}/}"
@@ -352,7 +352,17 @@ jobs:
           fi
 
           codesign --force --deep --sign - "$out_app"
-          hdiutil create -volname "DDGo" -srcfolder "$out_app" -ov -format UDZO "dist/ddgo-darwin-universal.dmg"
+          codesign --verify --deep --strict --verbose=2 "$out_app"
+
+          mkdir -p dmg-root
+          ditto "$out_app" "dmg-root/DDGo.app"
+
+          hdiutil create \
+            -volname "DDGo" \
+            -srcfolder dmg-root \
+            -ov \
+            -format UDZO \
+            "dist/ddgo-darwin-universal.dmg"
 
       - name: Upload universal DMG artifact
         uses: actions/upload-artifact@v4
