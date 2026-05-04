@@ -1,4 +1,4 @@
-module example.com/cncui
+module github.com/ianbruene/ddgo
 
 go 1.23
 

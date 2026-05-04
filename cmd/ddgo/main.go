@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"example.com/cncui/internal/app"
-	"example.com/cncui/internal/ports"
-	"example.com/cncui/internal/transport"
-	"example.com/cncui/internal/ui"
+	"github.com/ianbruene/ddgo/internal/app"
+	"github.com/ianbruene/ddgo/internal/ports"
+	"github.com/ianbruene/ddgo/internal/transport"
+	"github.com/ianbruene/ddgo/internal/ui"
 )
 
 func run(uiRunner func(*app.Controller) error) error {

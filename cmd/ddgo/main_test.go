@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"example.com/cncui/internal/app"
+	"github.com/ianbruene/ddgo/internal/app"
 )
 
 func TestRun_UsesUIRunner(t *testing.T) {
