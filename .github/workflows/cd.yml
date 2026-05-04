@@ -111,14 +111,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          output="dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          output="dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
 
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             export PATH="$(brew --prefix qt@5)/bin:$PATH"
             export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:$PKG_CONFIG_PATH"
           fi
 
-          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/cncui
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/ddgo
 
       - name: Build release binary (Windows)
         if: matrix.goos == 'windows'
@@ -126,20 +126,20 @@ jobs:
         shell: msys2 {0}
         run: |
           mkdir -p dist
-          output="dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          output="dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           echo "PATH=$PATH"
           echo "go binary: $(command -v go || true)"
           echo "go version: $(go version)"
           echo "gcc version: $(gcc --version | head -n1)"
           echo "pkg-config Qt5Core: $(pkg-config --modversion Qt5Core)"
           export CC=gcc
-          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/cncui
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/ddgo
 
       - name: Create macOS app bundle + DMG
         if: matrix.goos == 'darwin'
         shell: bash
         run: |
-          app_dir="dist/CNC UI.app"
+          app_dir="dist/DDGo.app"
           mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 
           cat > "$app_dir/Contents/Info.plist" <<'PLIST'
@@ -148,11 +148,13 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>CFBundleExecutable</key>
-            <string>cncui</string>
+            <string>ddgo</string>
             <key>CFBundleIdentifier</key>
-            <string>com.cncui.app</string>
+            <string>com.ianbruene.ddgo</string>
             <key>CFBundleName</key>
-            <string>CNC UI</string>
+            <string>DDGo</string>
+            <key>CFBundleDisplayName</key>
+            <string>DDGo</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
@@ -163,27 +165,35 @@ jobs:
           </plist>
           PLIST
 
-          cp "dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" "$app_dir/Contents/MacOS/cncui"
-          chmod +x "$app_dir/Contents/MacOS/cncui"
+          cp "dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" "$app_dir/Contents/MacOS/ddgo"
+          chmod +x "$app_dir/Contents/MacOS/ddgo"
 
           export PATH="$(brew --prefix qt@5)/bin:$PATH"
           cd dist
-          macdeployqt "CNC UI.app" -verbose=2 -dmg
+          macdeployqt "DDGo.app" -verbose=2 -dmg
 
-          mv "CNC UI.dmg" "cncui-darwin-${{ matrix.goarch }}.dmg"
+          mv "DDGo.dmg" "ddgo-darwin-${{ matrix.goarch }}.dmg"
+          tar -C . -czf "ddgo-darwin-${{ matrix.goarch }}-app.tar.gz" "DDGo.app"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cncui-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/cncui-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          name: ddgo-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
       - name: Upload macOS DMG artifact
         if: matrix.goos == 'darwin'
         uses: actions/upload-artifact@v4
         with:
-          name: cncui-darwin-${{ matrix.goarch }}-dmg
-          path: dist/cncui-darwin-${{ matrix.goarch }}.dmg
+          name: ddgo-darwin-${{ matrix.goarch }}-dmg
+          path: dist/ddgo-darwin-${{ matrix.goarch }}.dmg
+
+      - name: Upload macOS app bundle tar artifact
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddgo-darwin-${{ matrix.goarch }}-app
+          path: dist/ddgo-darwin-${{ matrix.goarch }}-app.tar.gz
 
       - name: Save Go build caches
         if: success() && steps.go-cache-restore.outputs.cache-hit != 'true'
@@ -205,42 +215,77 @@ jobs:
       - name: Download macOS Intel artifact
         uses: actions/download-artifact@v4
         with:
-          name: cncui-darwin-amd64
+          name: ddgo-darwin-amd64
           path: dist
 
       - name: Download macOS Apple Silicon artifact
         uses: actions/download-artifact@v4
         with:
-          name: cncui-darwin-arm64
+          name: ddgo-darwin-arm64
           path: dist
 
       - name: Merge macOS binaries into universal artifact
         shell: bash
         run: |
           mkdir -p dist
-          lipo -create -output dist/cncui-darwin-universal \
-            dist/cncui-darwin-amd64 \
-            dist/cncui-darwin-arm64
+          lipo -create -output dist/ddgo-darwin-universal \
+            dist/ddgo-darwin-amd64 \
+            dist/ddgo-darwin-arm64
 
       - name: Verify universal binary
         shell: bash
         run: |
-          archs="$(lipo -archs dist/cncui-darwin-universal)"
+          archs="$(lipo -archs dist/ddgo-darwin-universal)"
           echo "$archs"
           [[ "$archs" == *"x86_64"* && "$archs" == *"arm64"* ]]
-          file dist/cncui-darwin-universal
+          file dist/ddgo-darwin-universal
 
       - name: Upload universal artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cncui-darwin-universal
-          path: dist/cncui-darwin-universal
+          name: ddgo-darwin-universal
+          path: dist/ddgo-darwin-universal
+
+  build-macos-dual-dmg:
+    needs: build-artifacts
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download macOS Intel app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ddgo-darwin-amd64-app
+          path: dist/amd64
+
+      - name: Download macOS Apple Silicon app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ddgo-darwin-arm64-app
+          path: dist/arm64
+
+      - name: Extract app bundles and create dual-app DMG
+        shell: bash
+        run: |
+          mkdir -p dmg-root dist
+          tar -C dist/amd64 -xzf dist/amd64/ddgo-darwin-amd64-app.tar.gz
+          tar -C dist/arm64 -xzf dist/arm64/ddgo-darwin-arm64-app.tar.gz
+          mv "dist/amd64/DDGo.app" "dmg-root/DDGo Intel.app"
+          mv "dist/arm64/DDGo.app" "dmg-root/DDGo Apple Silicon.app"
+          hdiutil create -volname "DDGo" -srcfolder dmg-root -ov -format UDZO dist/ddgo-darwin-dual-app.dmg
+
+      - name: Upload dual-app DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddgo-darwin-dual-app-dmg
+          path: dist/ddgo-darwin-dual-app.dmg
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build-artifacts
       - build-macos-universal
+      - build-macos-dual-dmg
     runs-on: ubuntu-latest
 
     permissions:

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"example.com/cncui/internal/grbl"
-	"example.com/cncui/internal/ports"
-	"example.com/cncui/internal/transport"
+	"github.com/ianbruene/ddgo/internal/grbl"
+	"github.com/ianbruene/ddgo/internal/ports"
+	"github.com/ianbruene/ddgo/internal/transport"
 )
 
 func TestControllerRefreshPorts(t *testing.T) {

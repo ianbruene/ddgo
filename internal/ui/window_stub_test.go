@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"example.com/cncui/internal/app"
-	"example.com/cncui/internal/ports"
-	"example.com/cncui/internal/transport"
+	"github.com/ianbruene/ddgo/internal/app"
+	"github.com/ianbruene/ddgo/internal/ports"
+	"github.com/ianbruene/ddgo/internal/transport"
 )
 
 func TestRunStub(t *testing.T) {

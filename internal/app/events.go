@@ -3,8 +3,8 @@ package app
 import (
 	"time"
 
-	"example.com/cncui/internal/ports"
-	"example.com/cncui/internal/transport"
+	"github.com/ianbruene/ddgo/internal/ports"
+	"github.com/ianbruene/ddgo/internal/transport"
 )
 
 type EventKind string

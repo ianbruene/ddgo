@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"example.com/cncui/internal/app"
-	"example.com/cncui/internal/grbl"
-	"example.com/cncui/internal/ports"
-	"example.com/cncui/internal/transport"
+	"github.com/ianbruene/ddgo/internal/app"
+	"github.com/ianbruene/ddgo/internal/grbl"
+	"github.com/ianbruene/ddgo/internal/ports"
+	"github.com/ianbruene/ddgo/internal/transport"
 	qt "github.com/mappu/miqt/qt"
 )
 
@@ -76,7 +76,7 @@ func newWindow(controller *app.Controller) *Window {
 
 func (w *Window) build() {
 	w.window = qt.NewQMainWindow(nil)
-	w.window.SetWindowTitle("CNC UI")
+	w.window.SetWindowTitle("DDGo")
 	w.window.Resize(1180, 760)
 
 	central := qt.NewQWidget(nil)

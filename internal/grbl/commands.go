@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"example.com/cncui/internal/transport"
+	"github.com/ianbruene/ddgo/internal/transport"
 )
 
 type Action string

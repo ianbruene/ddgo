@@ -1,4 +1,4 @@
-# CNC UI foundation
+# DDGo foundation
 
 This is a starter Go module for a small CNC / GRBL-style desktop UI.
 
@@ -9,7 +9,7 @@ It is intentionally split into a thin UI layer and a testable core:
 - `internal/transport`: serial transport interface, fake transport, and real serial transport behind a build tag
 - `internal/ports`: serial port discovery helpers behind a build tag
 - `internal/ui`: MIQT / Qt Widgets UI behind a build tag
-- `cmd/cncui`: application entrypoint
+- `cmd/ddgo`: application entrypoint
 
 ## Layout
 
@@ -60,7 +60,7 @@ go test -tags serial ./internal/transport ./internal/ports ./internal/app ./inte
 On a machine with Qt 5 development packages installed:
 
 ```bash
-go build -tags 'miqt serial' ./cmd/cncui
+go build -tags 'miqt serial' ./cmd/ddgo
 ```
 
 ## Linux Qt prerequisites
