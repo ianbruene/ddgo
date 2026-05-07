@@ -33,14 +33,12 @@ out_dir="$(cd "$out_dir" && pwd)"
 out_dmg="$out_dir/$(basename "$out_dmg")"
 app_dir="$out_dir/DDGo.app"
 
-short_version="${version#v}"
-if [[ ! "$short_version" =~ ^[0-9]+([.][0-9]+){0,2}([-.+][0-9A-Za-z.-]+)?$ ]]; then
-  short_version="0.0.0"
-fi
-bundle_version="${short_version%%[-+]*}"
+bundle_version="${version#v}"
+bundle_version="${bundle_version%%[-+]*}"
 if [[ ! "$bundle_version" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
   bundle_version="0.0.0"
 fi
+short_version="$bundle_version"
 
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
