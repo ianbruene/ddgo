@@ -3,392 +3,89 @@ name: cd
 on:
   push:
     branches: [master]
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-artifacts:
-    timeout-minutes: 90
+  build-macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            ext: ""
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            ext: ".exe"
-          - os: macos-15-intel
-            goos: darwin
-            goarch: amd64
-            ext: ""
-          - os: macos-latest
-            goos: darwin
-            goarch: arm64
-            ext: ""
-
+          - os: macos-14
+            arch: amd64
+            lipo_arch: x86_64
+          - os: macos-14-arm64
+            arch: arm64
+            lipo_arch: arm64
     runs-on: ${{ matrix.os }}
-
     steps:
-      - name: Check out code
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: false
-
-      - name: Capture Go cache paths
-        id: go-cache-paths
-        shell: bash
-        run: |
-          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Go build caches
-        id: go-cache-restore
-        uses: actions/cache/restore@v4
+      - run: brew install qt@5 pkg-config
+      - run: |
+          mkdir -p dist
+          export PATH="$(brew --prefix qt@5)/bin:$PATH"
+          export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-darwin-${{ matrix.arch }} ./cmd/ddgo
+      - run: scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.arch }} dist/DDGo-macos-${{ matrix.arch }}.dmg ${{ github.ref_name }}
+      - run: scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }}
+      - uses: actions/upload-artifact@v4
         with:
-          path: |
-            ${{ steps.go-cache-paths.outputs.gomodcache }}
-            ${{ steps.go-cache-paths.outputs.gocache }}
-          key: cd-go-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}
-          restore-keys: |
-            cd-go-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-
-            cd-go-${{ runner.os }}-${{ matrix.goos }}-${{ matrix.goarch }}-
+          name: DDGo-macos-${{ matrix.arch }}
+          path: dist/DDGo-macos-${{ matrix.arch }}.dmg
 
-      - name: Install Linux build dependencies
-        if: matrix.goos == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config qtbase5-dev
-
-      - name: Install macOS build dependencies
-        if: matrix.goos == 'darwin'
-        run: |
-          brew update
-          brew install qt@5 pkg-config
-
-      - name: Set up MSYS2 (Windows Qt + MinGW toolchain)
-        if: matrix.goos == 'windows'
-        uses: msys2/setup-msys2@v2
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: msys2/setup-msys2@v2
         with:
           update: true
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-qt5-base
             mingw-w64-x86_64-pkgconf
+            zip
           msystem: MINGW64
           path-type: inherit
-
-      - name: macOS diagnostics
-        if: matrix.goos == 'darwin'
-        shell: bash
-        run: |
-          uname -a
-          uname -m
-          go env GOOS GOARCH CGO_ENABLED
-          brew --prefix qt@5
-          file "$(brew --prefix qt@5)/lib/libQt5Core.dylib" || true
-          pkg-config --modversion Qt5Core || true
-
-      - name: Download Go dependencies
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          go env -w GOPROXY=https://proxy.golang.org,direct
-          go mod download -x
-
-      - name: Build release binary (Linux/macOS)
-        if: matrix.goos != 'windows'
-        timeout-minutes: 20
-        shell: bash
+      - shell: msys2 {0}
         run: |
           mkdir -p dist
-          output="dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-
-          if [ "${{ matrix.goos }}" = "darwin" ]; then
-            export PATH="$(brew --prefix qt@5)/bin:$PATH"
-            export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:$PKG_CONFIG_PATH"
-          fi
-
-          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/ddgo
-
-      - name: Build release binary (Windows)
-        if: matrix.goos == 'windows'
-        timeout-minutes: 60
-        shell: msys2 {0}
-        run: |
-          mkdir -p dist
-          output="dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          echo "PATH=$PATH"
-          echo "go binary: $(command -v go || true)"
-          echo "go version: $(go version)"
-          echo "gcc version: $(gcc --version | head -n1)"
-          echo "pkg-config Qt5Core: $(pkg-config --modversion Qt5Core)"
           export CC=gcc
-          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=1 go build -v -tags "miqt serial" -trimpath -ldflags="-s -w" -o "$output" ./cmd/ddgo
-
-      - name: Create macOS app bundle + DMG
-        if: matrix.goos == 'darwin'
-        shell: bash
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-windows-amd64.exe ./cmd/ddgo
+          scripts/package-windows-msys2.sh dist/ddgo-windows-amd64.exe "$(pwd)/dist/DDGo-windows-amd64.zip"
+      - shell: pwsh
         run: |
-          app_dir="dist/DDGo.app"
-          mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
-
-          cat > "$app_dir/Contents/Info.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key>
-            <string>ddgo</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.ianbruene.ddgo</string>
-            <key>CFBundleName</key>
-            <string>DDGo</string>
-            <key>CFBundleDisplayName</key>
-            <string>DDGo</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>1.0</string>
-            <key>CFBundleVersion</key>
-            <string>1</string>
-          </dict>
-          </plist>
-          PLIST
-
-          cp "dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" "$app_dir/Contents/MacOS/ddgo"
-          chmod +x "$app_dir/Contents/MacOS/ddgo"
-
-          export PATH="$(brew --prefix qt@5)/bin:$PATH"
-          cd dist
-          macdeployqt "DDGo.app" -verbose=2 -dmg
-
-          mv "DDGo.dmg" "ddgo-darwin-${{ matrix.goarch }}.dmg"
-          tar -C . -czf "ddgo-darwin-${{ matrix.goarch }}-app.tar.gz" "DDGo.app"
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+          New-Item -ItemType Directory -Path dist\check | Out-Null
+          Expand-Archive -Path dist\DDGo-windows-amd64.zip -DestinationPath dist\check -Force
+          .\scripts\verify-windows-dist.ps1 -DistDir dist\check
+      - uses: actions/upload-artifact@v4
         with:
-          name: ddgo-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/ddgo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-
-      - name: Upload macOS DMG artifact
-        if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ddgo-darwin-${{ matrix.goarch }}-dmg
-          path: dist/ddgo-darwin-${{ matrix.goarch }}.dmg
-
-      - name: Upload macOS app bundle tar artifact
-        if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ddgo-darwin-${{ matrix.goarch }}-app
-          path: dist/ddgo-darwin-${{ matrix.goarch }}-app.tar.gz
-
-      - name: Save Go build caches
-        if: success() && steps.go-cache-restore.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ steps.go-cache-paths.outputs.gomodcache }}
-            ${{ steps.go-cache-paths.outputs.gocache }}
-          key: ${{ steps.go-cache-restore.outputs.cache-primary-key }}
-
-
-  build-macos-universal:
-    needs: build-artifacts
-    runs-on: macos-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Download macOS Intel artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ddgo-darwin-amd64
-          path: dist
-
-      - name: Download macOS Apple Silicon artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ddgo-darwin-arm64
-          path: dist
-
-      - name: Merge macOS binaries into universal artifact
-        shell: bash
-        run: |
-          mkdir -p dist
-          lipo -create -output dist/ddgo-darwin-universal \
-            dist/ddgo-darwin-amd64 \
-            dist/ddgo-darwin-arm64
-
-      - name: Verify universal binary
-        shell: bash
-        run: |
-          archs="$(lipo -archs dist/ddgo-darwin-universal)"
-          echo "$archs"
-          [[ "$archs" == *"x86_64"* && "$archs" == *"arm64"* ]]
-          file dist/ddgo-darwin-universal
-
-      - name: Upload universal artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ddgo-darwin-universal
-          path: dist/ddgo-darwin-universal
-
-  build-macos-dual-dmg:
-    needs: build-artifacts
-    runs-on: macos-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Download macOS Intel app artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ddgo-darwin-amd64-app
-          path: dist/amd64
-
-      - name: Download macOS Apple Silicon app artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ddgo-darwin-arm64-app
-          path: dist/arm64
-
-      - name: Extract app bundles and create dual-app DMG
-        shell: bash
-        run: |
-          mkdir -p dmg-root dist
-          tar -C dist/amd64 -xzf dist/amd64/ddgo-darwin-amd64-app.tar.gz
-          tar -C dist/arm64 -xzf dist/arm64/ddgo-darwin-arm64-app.tar.gz
-          mv "dist/amd64/DDGo.app" "dmg-root/DDGo Intel.app"
-          mv "dist/arm64/DDGo.app" "dmg-root/DDGo Apple Silicon.app"
-          hdiutil create -volname "DDGo" -srcfolder dmg-root -ov -format UDZO dist/ddgo-darwin-dual-app.dmg
-
-      - name: Upload dual-app DMG artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ddgo-darwin-dual-app-dmg
-          path: dist/ddgo-darwin-dual-app.dmg
-
-  build-macos-universal-dmg:
-    needs: build-artifacts
-    runs-on: macos-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Download macOS Intel app artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ddgo-darwin-amd64-app
-          path: work/amd64
-
-      - name: Download macOS Apple Silicon app artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ddgo-darwin-arm64-app
-          path: work/arm64
-
-      - name: Create true universal app and DMG
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p dist
-          tar -C work/amd64 -xzf work/amd64/ddgo-darwin-amd64-app.tar.gz
-          tar -C work/arm64 -xzf work/arm64/ddgo-darwin-arm64-app.tar.gz
-
-          amd_app="work/amd64/DDGo.app"
-          arm_app="work/arm64/DDGo.app"
-          out_app="dist/DDGo.app"
-
-          ditto "$arm_app" "$out_app"
-
-          while IFS= read -r -d '' arm_file; do
-            rel="${arm_file#${arm_app}/}"
-            amd_file="$amd_app/$rel"
-            out_file="$out_app/$rel"
-
-            if [ ! -f "$amd_file" ]; then
-              continue
-            fi
-
-            if file "$arm_file" | grep -q 'Mach-O' && file "$amd_file" | grep -q 'Mach-O'; then
-              lipo -create -output "$out_file" "$amd_file" "$arm_file"
-              if [ -x "$arm_file" ]; then
-                chmod +x "$out_file"
-              fi
-            fi
-          done < <(find "$arm_app" -type f -print0)
-
-          main_archs="$(lipo -archs "$out_app/Contents/MacOS/ddgo")"
-          echo "main executable archs: $main_archs"
-          [[ "$main_archs" == *"x86_64"* && "$main_archs" == *"arm64"* ]]
-
-          missing_arch=0
-          while IFS= read -r -d '' out_file; do
-            if ! file "$out_file" | grep -q 'Mach-O'; then
-              continue
-            fi
-
-            archs="$(lipo -archs "$out_file")"
-            if [[ "$archs" != *"x86_64"* || "$archs" != *"arm64"* ]]; then
-              echo "non-universal Mach-O: $out_file ($archs)"
-              missing_arch=1
-            fi
-          done < <(find "$out_app" -type f -print0)
-
-          if [ "$missing_arch" -ne 0 ]; then
-            exit 1
-          fi
-
-          codesign --force --deep --sign - "$out_app"
-          codesign --verify --deep --strict --verbose=2 "$out_app"
-
-          mkdir -p dmg-root
-          ditto "$out_app" "dmg-root/DDGo.app"
-
-          hdiutil create \
-            -volname "DDGo" \
-            -srcfolder dmg-root \
-            -ov \
-            -format UDZO \
-            "dist/ddgo-darwin-universal.dmg"
-
-      - name: Upload universal DMG artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ddgo-darwin-universal-dmg
-          path: dist/ddgo-darwin-universal.dmg
+          name: DDGo-windows-amd64
+          path: dist/DDGo-windows-amd64.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - build-artifacts
-      - build-macos-universal
-      - build-macos-dual-dmg
-      - build-macos-universal-dmg
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: dist
-
-      - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          files: |
+            dist/DDGo-macos-amd64/DDGo-macos-amd64.dmg
+            dist/DDGo-macos-arm64/DDGo-macos-arm64.dmg
+            dist/DDGo-windows-amd64/DDGo-windows-amd64.zip
