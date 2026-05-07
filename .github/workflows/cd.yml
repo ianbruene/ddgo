@@ -15,10 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-14-large
             arch: amd64
             lipo_arch: x86_64
-          - os: macos-14-arm64
+          - os: macos-14
             arch: arm64
             lipo_arch: arm64
     runs-on: ${{ matrix.os }}
@@ -28,29 +28,32 @@ jobs:
         with:
           go-version-file: go.mod
       - run: brew install qt@5 pkg-config
-      - run: |
+      - name: Build macOS binary
+        run: |
+          set -euo pipefail
           mkdir -p dist
           export PATH="$(brew --prefix qt@5)/bin:$PATH"
-          export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export MACOSX_DEPLOYMENT_TARGET=14.0
           GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-darwin-${{ matrix.arch }} ./cmd/ddgo
-      - run: scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.arch }} dist/DDGo-macos-${{ matrix.arch }}.dmg ${{ github.ref_name }}
-      - run: scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }}
+      - name: Package macOS DMG
+        run: bash scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.arch }} dist/DDGo-macos-${{ matrix.arch }}.dmg ${{ github.ref_name }}
+      - name: Verify macOS app bundle
+        run: bash scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }} 14.0
       - uses: actions/upload-artifact@v4
         with:
           name: DDGo-macos-${{ matrix.arch }}
           path: dist/DDGo-macos-${{ matrix.arch }}.dmg
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
       - uses: msys2/setup-msys2@v2
         with:
           update: true
           install: >-
+            mingw-w64-x86_64-go
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-qt5-base
             mingw-w64-x86_64-pkgconf
@@ -59,15 +62,19 @@ jobs:
           path-type: inherit
       - shell: msys2 {0}
         run: |
+          set -euo pipefail
           mkdir -p dist
+          export PATH="${MINGW_PREFIX}/bin:/usr/bin:${PATH}"
           export CC=gcc
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-windows-amd64.exe ./cmd/ddgo
-          scripts/package-windows-msys2.sh dist/ddgo-windows-amd64.exe "$(pwd)/dist/DDGo-windows-amd64.zip"
+          go version
+          gcc --version
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w -H windowsgui" -o dist/ddgo-windows-amd64.exe ./cmd/ddgo
+          bash scripts/package-windows-msys2.sh dist/ddgo-windows-amd64.exe "$(pwd)/dist/DDGo-windows-amd64.zip"
       - shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist\check | Out-Null
           Expand-Archive -Path dist\DDGo-windows-amd64.zip -DestinationPath dist\check -Force
-          .\scripts\verify-windows-dist.ps1 -DistDir dist\check
+          .\scripts\verify-windows-dist.ps1 -DistDir dist\check\DDGo
       - uses: actions/upload-artifact@v4
         with:
           name: DDGo-windows-amd64
