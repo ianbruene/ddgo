@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14-large
+          - os: macos-15-intel
             arch: amd64
             lipo_arch: x86_64
           - os: macos-14
@@ -27,17 +27,39 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: brew install qt@5 pkg-config
+      - name: Diagnose macOS runner
+        run: |
+          set -euo pipefail
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=$RUNNER_ARCH"
+          echo "ImageOS=${ImageOS:-}"
+          sw_vers
+          uname -a
+          uname -m
+          xcode-select -p
+          clang --version
+          brew --version
+      - name: Install macOS dependencies
+        run: |
+          set -euo pipefail
+          brew install qt@5 pkg-config
+          brew --prefix qt@5
+          ls -la "$(brew --prefix qt@5)/bin" | sed -n '1,40p'
       - name: Build macOS binary
         run: |
           set -euo pipefail
+          echo "Building for GOARCH=${{ matrix.arch }} on runner arch $(uname -m)"
+          go env
           mkdir -p dist
           export PATH="$(brew --prefix qt@5)/bin:$PATH"
           export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           export MACOSX_DEPLOYMENT_TARGET=14.0
           GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-darwin-${{ matrix.arch }} ./cmd/ddgo
       - name: Package macOS DMG
-        run: bash scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.arch }} dist/DDGo-macos-${{ matrix.arch }}.dmg ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.arch }} dist/DDGo-macos-${{ matrix.arch }}.dmg ${{ github.ref_name }}
+          ls -lah dist
       - name: Verify macOS app bundle
         run: bash scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }} 14.0
       - uses: actions/upload-artifact@v4

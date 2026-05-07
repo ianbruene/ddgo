@@ -12,9 +12,9 @@ Universal macOS artifacts are intentionally **not** published until all Mach-O f
 
 ## GitHub Actions runner policy
 
-Use explicit macOS 14 runner labels for release builds:
+Use explicit macOS runner labels for release builds:
 
-- Intel / amd64: `macos-14-large`
+- Intel / amd64: `macos-15-intel` (fallback if unavailable: `macos-14-large` only when larger runners are enabled for the repo/account)
 - Apple Silicon / arm64: `macos-14`
 
 Do not use `macos-latest` for release artifacts because it can move to a newer OS or architecture and change the Qt/Homebrew environment under the workflow.
