@@ -103,7 +103,7 @@ jobs:
           path: dist/DDGo-windows-amd64.zip
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && always() }}
     needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
@@ -112,8 +112,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          if-no-artifact-found: ignore
+      - name: Ensure at least one release artifact exists
+        run: |
+          shopt -s nullglob
+          files=(dist/*/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release artifacts were found."
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: false
           files: |
             dist/DDGo-macos-amd64/DDGo-macos-amd64.dmg
             dist/DDGo-macos-arm64/DDGo-macos-arm64.dmg
