@@ -6,6 +6,23 @@ if [[ $# -lt 2 || $# -gt 3 ]]; then
   exit 1
 fi
 
+version_le() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+def parts(v):
+    out = []
+    for part in v.split('.'):
+        digits = ''.join(ch for ch in part if ch.isdigit())
+        out.append(int(digits or '0'))
+    while len(out) < 3:
+        out.append(0)
+    return out[:3]
+
+sys.exit(0 if parts(sys.argv[1]) <= parts(sys.argv[2]) else 1)
+PY
+}
+
 app="$1"
 expected="$2"
 max_minos="${3:-14.0}"
@@ -26,14 +43,10 @@ if [[ ! -f "$plist" ]]; then
 fi
 
 plist_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")"
-python3 - "$plist_min" "$max_minos" <<'PY'
-import sys
-from packaging.version import Version
-actual = Version(sys.argv[1])
-limit = Version(sys.argv[2])
-if actual > limit:
-    raise SystemExit(f"LSMinimumSystemVersion {actual} exceeds {limit}")
-PY
+if ! version_le "$plist_min" "$max_minos"; then
+  echo "LSMinimumSystemVersion $plist_min exceeds $max_minos" >&2
+  exit 1
+fi
 
 fail=0
 while IFS= read -r -d '' f; do
@@ -48,12 +61,7 @@ while IFS= read -r -d '' f; do
   minos_lines="$(otool -l "$f" | awk '/LC_BUILD_VERSION/{in_build=1; next} in_build && /minos/{print $2; in_build=0}')"
   while IFS= read -r minos; do
     [[ -z "$minos" ]] && continue
-    if ! python3 - "$minos" "$max_minos" <<'PY'
-import sys
-from packaging.version import Version
-sys.exit(0 if Version(sys.argv[1]) <= Version(sys.argv[2]) else 1)
-PY
-    then
+    if ! version_le "$minos" "$max_minos"; then
       echo "minos $minos exceeds $max_minos: $f" >&2
       fail=1
     fi
