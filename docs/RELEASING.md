@@ -14,7 +14,7 @@ Universal macOS artifacts are intentionally **not** published until all Mach-O f
 
 Use explicit macOS runner labels for release builds:
 
-- Intel / amd64: `macos-15-intel` (fallback if unavailable: `macos-14-large` only when larger runners are enabled for the repo/account)
+- Intel / amd64: `macos-14-large` (current release runner; switch to `macos-15-intel` only if `macos-14-large` becomes unavailable)
 - Apple Silicon / arm64: `macos-14`
 
 Do not use `macos-latest` for release artifacts because it can move to a newer OS or architecture and change the Qt/Homebrew environment under the workflow.
@@ -33,6 +33,8 @@ Repeat with `GOARCH=arm64`, `DDGo-macos-arm64.dmg`, and expected arch `arm64` fo
 `package-macos.sh` keeps the deployed app bundle at `dist/DDGo.app`, sets `LSMinimumSystemVersion` in `Info.plist`, and uses `macdeployqt` to bundle Qt frameworks/plugins.
 
 The verifier checks every Mach-O file in the app bundle, not only the main executable. This catches cases where the executable has the right architecture but bundled Qt frameworks/plugins do not.
+
+If Intel verification fails (for example, a bundled Qt framework/plugin reports deployment target above 14.0), keep the Intel job failing and do not publish the Intel DMG. CI should emit a clear blocker annotation and still allow Windows and arm64 artifacts to publish.
 
 ## Windows (MSYS2 / MinGW)
 

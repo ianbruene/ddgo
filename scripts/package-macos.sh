@@ -10,7 +10,6 @@ arch="$1"
 bin_path="$2"
 out_dmg="$3"
 version="${4:-0.0.0}"
-min_macos="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 
 case "$arch" in
   arm64|amd64) ;;
@@ -23,9 +22,9 @@ if [[ ! -f "$bin_path" ]]; then
 fi
 
 qt_prefix="$(brew --prefix qt@5)"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 export PATH="$qt_prefix/bin:$PATH"
 export PKG_CONFIG_PATH="$qt_prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-export MACOSX_DEPLOYMENT_TARGET="$min_macos"
 
 out_dir="$(dirname "$out_dmg")"
 mkdir -p "$out_dir"
@@ -33,8 +32,12 @@ out_dir="$(cd "$out_dir" && pwd)"
 out_dmg="$out_dir/$(basename "$out_dmg")"
 app_dir="$out_dir/DDGo.app"
 
-bundle_version="${version#v}"
-bundle_version="${bundle_version%%[-+]*}"
+if [[ "$version" == "master" ]]; then
+  bundle_version="0.0.0"
+else
+  bundle_version="${version#v}"
+  bundle_version="${bundle_version%%[-+]*}"
+fi
 if [[ ! "$bundle_version" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
   bundle_version="0.0.0"
 fi
@@ -54,15 +57,26 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${short_version}</string>
 <key>CFBundleVersion</key><string>${bundle_version}</string>
-<key>LSMinimumSystemVersion</key><string>${min_macos}</string>
+<key>LSMinimumSystemVersion</key><string>${MACOSX_DEPLOYMENT_TARGET}</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
 
-cp "$bin_path" "$app_dir/Contents/MacOS/ddgo"
+ditto "$bin_path" "$app_dir/Contents/MacOS/ddgo"
 chmod +x "$app_dir/Contents/MacOS/ddgo"
 
-macdeployqt "$app_dir" -verbose=2
+test -f "$app_dir/Contents/Info.plist"
+test -x "$app_dir/Contents/MacOS/ddgo"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist"
+file "$app_dir/Contents/MacOS/ddgo"
+lipo -archs "$app_dir/Contents/MacOS/ddgo"
+otool -L "$app_dir/Contents/MacOS/ddgo"
+
+"$qt_prefix/bin/macdeployqt" "$app_dir" -verbose=2
+
+find "$app_dir/Contents" -type f | sort
+find "$app_dir/Contents" -name 'libqcocoa.dylib' -print
+
 codesign --force --deep --sign - "$app_dir"
 codesign --verify --deep --strict --verbose=2 "$app_dir"
 
