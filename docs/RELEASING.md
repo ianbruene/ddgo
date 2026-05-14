@@ -14,20 +14,24 @@ Universal macOS artifacts are intentionally **not** published until all Mach-O f
 
 Use explicit macOS runner labels for release builds:
 
-- Intel / amd64: `macos-14-large`
+- Intel / amd64 (Sonoma target build): `macos-14-large`
+- Intel / amd64 (host comparison build): `macos-15-intel`
 - Apple Silicon / arm64: `macos-14`
 
 Do not use `macos-latest` for release artifacts because it can move to a newer OS or architecture and change the Qt/Homebrew environment under the workflow.
 
 `macos-14-large` is GitHub's x64 macOS 14 runner label and is part of GitHub's macOS larger-runner labels. If the Intel job fails before any steps/logs are emitted, that indicates runner allocation/availability for `macos-14-large` rather than a DDGo build/package failure.
 
+The additional `macos-15-intel` leg is only a hosted-runner comparison signal for x64 Intel build behavior/availability.
+
 ## macOS
 
 Keep macOS runtime targeting pinned to Sonoma unless intentionally dropping support:
 
-- Intel macOS CI runner: `macos-14-large`
-- Intel runtime target: macOS `14.0`
-- Verifier target: `14.0`
+- Intel macOS 14 runner: `macos-14-large`
+- Intel macOS 15 comparison runner: `macos-15-intel`
+- Runtime target for both Intel builds: macOS `14.0`
+- Verifier target for both Intel builds: `14.0`
 - Do not bump `LSMinimumSystemVersion`, `MACOSX_DEPLOYMENT_TARGET`, or verifier max-minos to 15 unless intentionally dropping Sonoma support.
 
 1. Build binary:
@@ -59,3 +63,5 @@ If Intel verification fails (for example, a bundled Qt framework/plugin reports 
 The zip contains a `DDGo/` folder. Testers should extract the whole zip and run `DDGo/DDGo.exe`; moving the exe out of that folder will break Qt DLL/plugin loading.
 
 The package must include Qt GUI DLLs, MinGW runtime DLLs, and `platforms/qwindows.dll`.
+
+The `macos-15-intel` artifact is a diagnostic/comparison artifact. It is only valid for Sonoma/macOS 14 users if `verify-macos-app.sh` passes with max target `14.0`.
