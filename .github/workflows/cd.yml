@@ -95,6 +95,13 @@ jobs:
           set -euo pipefail
           bash scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.artifact_suffix }} dist/${{ matrix.package_name }}.dmg ${{ github.ref_name }}
           ls -lah dist
+      - name: Upload packaged macOS DMG for testing
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.package_name }}
+          if-no-files-found: ignore
+          path: dist/${{ matrix.package_name }}.dmg
       - name: Diagnose packaged macOS app
         if: always()
         run: |
@@ -127,12 +134,6 @@ jobs:
           path: |
             dist/DDGo.app
             dist/${{ matrix.package_name }}.dmg
-      - uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: DDGo-macos-${{ matrix.artifact_suffix }}
-          path: dist/${{ matrix.package_name }}.dmg
-
   build-windows:
     runs-on: windows-2022
     steps:
@@ -190,6 +191,16 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: false
+          body: |
+            ### macOS testing notes
+
+            This release may include partial single-architecture macOS artifacts:
+
+            - `DDGo-macos-arm64.dmg`: Apple Silicon build, expected target macOS 14+.
+            - `DDGo-macos-amd64.dmg`: Intel macOS 14 build, only present when the `macos-14-large` runner is available.
+            - `DDGo-macos-amd64-macos15.dmg`: Intel build produced on macOS 15. This is for testing only and may require macOS 15+ because bundled Homebrew dependency dylibs can declare `minos 15.0`.
+
+            The macOS 15 Intel artifact should not be treated as the Sonoma-compatible Intel build.
           files: |
             dist/DDGo-macos-amd64/DDGo-macos-amd64.dmg
             dist/DDGo-macos-amd64-macos15/DDGo-macos-amd64-macos15.dmg

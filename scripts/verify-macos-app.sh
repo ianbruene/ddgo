@@ -128,6 +128,17 @@ while IFS= read -r -d '' f; do
     fi
   fi
 
+  file_info="$(file "$f")"
+  deps_start=2
+
+  # For Mach-O dylibs, framework binaries, and Qt plugins, the first
+  # otool -L entry is LC_ID_DYLIB: the file's own install name.
+  # It is not a dependency/load path and must not be treated as an
+  # unbundled Homebrew leak.
+  if echo "$file_info" | grep -q 'dynamically linked shared library'; then
+    deps_start=3
+  fi
+
   while IFS= read -r dep; do
     [[ -z "$dep" ]] && continue
     dep_path="$(echo "$dep" | awk '{print $1}')"
@@ -135,14 +146,14 @@ while IFS= read -r -d '' f; do
       "$f"|@executable_path/*|@loader_path/*|@rpath/*|/System/Library/*|/usr/lib/*) ;;
       /usr/local/opt/qt@5/*|/opt/homebrew/opt/qt@5/*|/usr/local/Cellar/qt@5/*|/opt/homebrew/Cellar/qt@5/*)
         status="fail"
-        mark_fail "unbundled Homebrew Qt load path in $f: $dep_path"
+        mark_fail "unbundled Homebrew Qt dependency path in $f: $dep_path"
         ;;
       *)
         status="fail"
-        mark_fail "disallowed load path in $f: $dep_path"
+        mark_fail "disallowed dependency path in $f: $dep_path"
         ;;
     esac
-  done < <(otool -L "$f" | tail -n +2)
+  done < <(otool -L "$f" | tail -n +"$deps_start")
 
   dep_str="${dep_targets[*]:-none}"
   dep_str="${dep_str// /,}"
