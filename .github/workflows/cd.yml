@@ -23,20 +23,22 @@ jobs:
             lipo_arch: x86_64
             artifact_suffix: amd64
             package_name: DDGo-macos-amd64
+            macos_min: "14.0"
 
-          # Additional Intel runner used to compare hosted x64 availability/build behavior.
-          # This is a build-host change only; runtime targeting and verification remain 14.0.
+          # Intel macOS 15 artifact. This is a true macOS 15+ build, not a Sonoma build.
           - os: macos-15-intel
             arch: amd64
             lipo_arch: x86_64
             artifact_suffix: amd64-macos15
             package_name: DDGo-macos-amd64-macos15
+            macos_min: "15.0"
 
           - os: macos-14
             arch: arm64
             lipo_arch: arm64
             artifact_suffix: arm64
             package_name: DDGo-macos-arm64
+            macos_min: "14.0"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -84,16 +86,25 @@ jobs:
         run: |
           set -euo pipefail
           echo "Building for GOARCH=${{ matrix.arch }} on runner arch $(uname -m)"
+          echo "macOS runtime minimum target: ${{ matrix.macos_min }}"
+          echo "runner: ${{ matrix.os }}"
+          echo "artifact: ${{ matrix.package_name }}"
           go env
           mkdir -p dist
           export PATH="$(brew --prefix qt@5)/bin:$PATH"
           export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-          export MACOSX_DEPLOYMENT_TARGET=14.0
+          export MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}"
           GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-darwin-${{ matrix.artifact_suffix }} ./cmd/ddgo
       - name: Package macOS DMG
         run: |
           set -euo pipefail
-          bash scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.artifact_suffix }} dist/${{ matrix.package_name }}.dmg ${{ github.ref_name }}
+          MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}" \
+            bash scripts/package-macos.sh \
+              ${{ matrix.arch }} \
+              dist/ddgo-darwin-${{ matrix.artifact_suffix }} \
+              dist/${{ matrix.package_name }}.dmg \
+              ${{ github.ref_name }}
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' dist/DDGo.app/Contents/Info.plist
           ls -lah dist
       - name: Upload packaged macOS DMG for testing
         uses: actions/upload-artifact@v4
@@ -122,7 +133,7 @@ jobs:
             echo "dist/DDGo.app does not exist"
           fi
       - name: Verify macOS app bundle
-        run: bash scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }} 14.0
+        run: bash scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }} ${{ matrix.macos_min }}
       - name: Intel compatibility blocker annotation
         if: failure() && matrix.arch == 'amd64'
         run: echo "::error::Intel macOS artifact is blocked because bundled Qt requires macOS <version>; need a compatible Qt 5 build or Intel macOS 14 runner."
