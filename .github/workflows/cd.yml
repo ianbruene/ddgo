@@ -39,12 +39,31 @@ jobs:
           xcode-select -p
           clang --version
           brew --version
+          brew config
       - name: Install macOS dependencies
         run: |
           set -euo pipefail
           brew install qt@5 pkg-config
-          brew --prefix qt@5
-          ls -la "$(brew --prefix qt@5)/bin" | sed -n '1,40p'
+      - name: Diagnose macOS Qt
+        run: |
+          set -euo pipefail
+          qt_prefix="$(brew --prefix qt@5)"
+          echo "qt_prefix=$qt_prefix"
+          echo "PATH=$PATH"
+          echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-}"
+          test -x "$qt_prefix/bin/macdeployqt"
+          "$qt_prefix/bin/qmake" -v || true
+          pkg-config --modversion Qt5Core Qt5Gui Qt5Widgets || true
+          pkg-config --cflags Qt5Core Qt5Gui Qt5Widgets || true
+          pkg-config --libs Qt5Core Qt5Gui Qt5Widgets || true
+          find "$qt_prefix" \( -name "QtCore" -o -name "QtGui" -o -name "QtWidgets" -o -name "libqcocoa.dylib" \) -print | while read -r f; do
+            echo "== $f"
+            file "$f" || true
+            lipo -archs "$f" || true
+            otool -L "$f" || true
+            otool -l "$f" | grep -A4 LC_BUILD_VERSION || true
+            otool -l "$f" | grep -A3 LC_VERSION_MIN_MACOSX || true
+          done
       - name: Build macOS binary
         run: |
           set -euo pipefail
@@ -60,9 +79,40 @@ jobs:
           set -euo pipefail
           bash scripts/package-macos.sh ${{ matrix.arch }} dist/ddgo-darwin-${{ matrix.arch }} dist/DDGo-macos-${{ matrix.arch }}.dmg ${{ github.ref_name }}
           ls -lah dist
+      - name: Diagnose packaged macOS app
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -d dist/DDGo.app ]]; then
+            find dist/DDGo.app/Contents -maxdepth 5 -print | sort | sed -n '1,300p'
+            find dist/DDGo.app/Contents -type f -print0 | while IFS= read -r -d '' f; do
+              if file "$f" | grep -q 'Mach-O'; then
+                echo "== $f"
+                file "$f" || true
+                lipo -archs "$f" || true
+                otool -L "$f" || true
+                otool -l "$f" | grep -A4 LC_BUILD_VERSION || true
+                otool -l "$f" | grep -A3 LC_VERSION_MIN_MACOSX || true
+              fi
+            done
+          else
+            echo "dist/DDGo.app does not exist"
+          fi
       - name: Verify macOS app bundle
         run: bash scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }} 14.0
+      - name: Intel compatibility blocker annotation
+        if: failure() && matrix.arch == 'amd64'
+        run: echo "::error::Intel macOS artifact is blocked because bundled Qt requires macOS <version>; need a compatible Qt 5 build or Intel macOS 14 runner."
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-macos-${{ matrix.arch }}
+          if-no-files-found: ignore
+          path: |
+            dist/DDGo.app
+            dist/DDGo-macos-${{ matrix.arch }}.dmg
+      - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: DDGo-macos-${{ matrix.arch }}
           path: dist/DDGo-macos-${{ matrix.arch }}.dmg
