@@ -14,12 +14,21 @@ Universal macOS artifacts are intentionally **not** published until all Mach-O f
 
 Use explicit macOS runner labels for release builds:
 
-- Intel / amd64: `macos-14-large` (current release runner; switch to `macos-15-intel` only if `macos-14-large` becomes unavailable)
+- Intel / amd64: `macos-14-large`
 - Apple Silicon / arm64: `macos-14`
 
 Do not use `macos-latest` for release artifacts because it can move to a newer OS or architecture and change the Qt/Homebrew environment under the workflow.
 
+`macos-14-large` is GitHub's x64 macOS 14 runner label and is part of GitHub's macOS larger-runner labels. If the Intel job fails before any steps/logs are emitted, that indicates runner allocation/availability for `macos-14-large` rather than a DDGo build/package failure.
+
 ## macOS
+
+Keep macOS runtime targeting pinned to Sonoma unless intentionally dropping support:
+
+- Intel macOS CI runner: `macos-14-large`
+- Intel runtime target: macOS `14.0`
+- Verifier target: `14.0`
+- Do not bump `LSMinimumSystemVersion`, `MACOSX_DEPLOYMENT_TARGET`, or verifier max-minos to 15 unless intentionally dropping Sonoma support.
 
 1. Build binary:
    `GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=14.0 go build -tags 'miqt serial' -o dist/ddgo-darwin-amd64 ./cmd/ddgo`

@@ -15,6 +15,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Intel macOS 14 uses GitHub's x64 macOS larger runner label.
+          # If this job fails before any steps/logs appear, the repo/account likely
+          # cannot allocate macos-14-large; do not debug package scripts from that signal.
           - os: macos-14-large
             arch: amd64
             lipo_arch: x86_64

@@ -92,10 +92,10 @@ while IFS= read -r -d '' f; do
     mark_fail "missing arch $expected: $f ($archs)"
   fi
 
-  mapfile -t build_minos < <(otool -l "$f" | awk '/LC_BUILD_VERSION/{inb=1; next} inb && /minos/{print $2; inb=0}')
-  mapfile -t version_min < <(otool -l "$f" | awk '/LC_VERSION_MIN_MACOSX/{inv=1; next} inv && /version/{print $2; inv=0}')
+  build_minos="$(otool -l "$f" | awk '/LC_BUILD_VERSION/{inb=1; next} inb && /minos/{print $2; inb=0}')"
+  version_min="$(otool -l "$f" | awk '/LC_VERSION_MIN_MACOSX/{inv=1; next} inv && /version/{print $2; inv=0}')"
 
-  for d in "${build_minos[@]}"; do
+  while IFS= read -r d; do
     [[ -z "$d" ]] && continue
     has_dep_cmd=1
     dep_targets+=("minos:$d")
@@ -103,9 +103,9 @@ while IFS= read -r -d '' f; do
       status="fail"
       mark_fail "LC_BUILD_VERSION minos $d exceeds $max_minos: $f"
     fi
-  done
+  done <<< "$build_minos"
 
-  for d in "${version_min[@]}"; do
+  while IFS= read -r d; do
     [[ -z "$d" ]] && continue
     has_dep_cmd=1
     dep_targets+=("version:$d")
@@ -113,7 +113,7 @@ while IFS= read -r -d '' f; do
       status="fail"
       mark_fail "LC_VERSION_MIN_MACOSX version $d exceeds $max_minos: $f"
     fi
-  done
+  done <<< "$version_min"
 
   if [[ "$f" == "$exe" ]] || [[ "$f" == *"Qt"*.framework/* ]] || [[ "$f" == *"/PlugIns/"* ]] || [[ "$f" == *"/Plugins/"* ]]; then
     important=1
