@@ -11,80 +11,16 @@ bin_path="$2"
 out_dmg="$3"
 version="${4:-0.0.0}"
 
-case "$arch" in
-  arm64|amd64) ;;
-  *) echo "unsupported arch: $arch" >&2; exit 1 ;;
-esac
-
-if [[ ! -f "$bin_path" ]]; then
-  echo "input binary not found: $bin_path" >&2
-  exit 1
-fi
-
-qt_prefix="$(brew --prefix qt@5)"
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
-export PATH="$qt_prefix/bin:$PATH"
-export PKG_CONFIG_PATH="$qt_prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
 out_dir="$(dirname "$out_dmg")"
 mkdir -p "$out_dir"
 out_dir="$(cd "$out_dir" && pwd)"
 out_dmg="$out_dir/$(basename "$out_dmg")"
 app_dir="$out_dir/DDGo.app"
 
-if [[ "$version" == "master" ]]; then
-  bundle_version="0.0.0"
-else
-  bundle_version="${version#v}"
-  bundle_version="${bundle_version%%[-+]*}"
-fi
-if [[ ! "$bundle_version" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
-  bundle_version="0.0.0"
-fi
-short_version="$bundle_version"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-rm -rf "$app_dir"
-mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
-
-cat > "$app_dir/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>ddgo</string>
-<key>CFBundleIdentifier</key><string>com.ianbruene.ddgo</string>
-<key>CFBundleName</key><string>DDGo</string>
-<key>CFBundleDisplayName</key><string>DDGo</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>${short_version}</string>
-<key>CFBundleVersion</key><string>${bundle_version}</string>
-<key>LSMinimumSystemVersion</key><string>${MACOSX_DEPLOYMENT_TARGET}</string>
-<key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-PLIST
-
-ditto "$bin_path" "$app_dir/Contents/MacOS/ddgo"
-chmod +x "$app_dir/Contents/MacOS/ddgo"
-
-test -f "$app_dir/Contents/Info.plist"
-test -x "$app_dir/Contents/MacOS/ddgo"
-/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist"
-file "$app_dir/Contents/MacOS/ddgo"
-lipo -archs "$app_dir/Contents/MacOS/ddgo"
-otool -L "$app_dir/Contents/MacOS/ddgo"
-
-"$qt_prefix/bin/macdeployqt" "$app_dir" -verbose=2
-
-find "$app_dir/Contents" -type f | sort
-find "$app_dir/Contents" -name 'libqcocoa.dylib' -print
-
-codesign --force --deep --sign - "$app_dir"
-codesign --verify --deep --strict --verbose=2 "$app_dir"
-
-workdir="$(mktemp -d)"
-trap 'rm -rf "$workdir"' EXIT
-mkdir -p "$workdir/dmg-root"
-ditto "$app_dir" "$workdir/dmg-root/DDGo.app"
-hdiutil create -volname "DDGo" -srcfolder "$workdir/dmg-root" -ov -format UDZO "$out_dmg"
+bash "$script_dir/package-macos-app.sh" "$arch" "$bin_path" "$app_dir" "$version"
+bash "$script_dir/create-macos-dmg.sh" "$app_dir" "$out_dmg"
 
 echo "created $out_dmg"
 echo "kept app bundle at $app_dir"
