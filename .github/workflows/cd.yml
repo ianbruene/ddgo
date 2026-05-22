@@ -61,15 +61,14 @@ jobs:
             -o dist/ddgo-darwin-${{ matrix.slice }} \
             ./cmd/ddgo
 
-          bash scripts/package-macos.sh \
-            ${{ matrix.arch }} \
-            dist/ddgo-darwin-${{ matrix.slice }} \
-            dist/tmp-${{ matrix.slice }}.dmg \
-            ${{ github.ref_name }}
-
           rm -rf dist/macos-${{ matrix.slice }}
           mkdir -p dist/macos-${{ matrix.slice }}
-          ditto dist/DDGo.app dist/macos-${{ matrix.slice }}/DDGo.app
+
+          bash scripts/package-macos-app.sh \
+            ${{ matrix.arch }} \
+            dist/ddgo-darwin-${{ matrix.slice }} \
+            dist/macos-${{ matrix.slice }}/DDGo.app \
+            ${{ github.ref_name }}
       - name: Verify macOS app slice
         run: bash scripts/verify-macos-app.sh dist/macos-${{ matrix.slice }}/DDGo.app ${{ matrix.lipo_arch }} 15.0
       - name: Archive macOS app slice
