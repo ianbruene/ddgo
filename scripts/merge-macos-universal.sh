@@ -29,12 +29,23 @@ rm -rf "$out_app"
 mkdir -p "$(dirname "$out_app")"
 ditto "$arm_app" "$out_app"
 
-mapfile -d '' arm_files < <(cd "$arm_app" && find . -type f -print0)
-mapfile -d '' amd_files < <(cd "$amd_app" && find . -type f -print0)
+tmpdir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
 
-arm_list="$(printf '%s\n' "${arm_files[@]}" | sed '/^$/d' | sort)"
-amd_list="$(printf '%s\n' "${amd_files[@]}" | sed '/^$/d' | sort)"
-all_list="$(printf '%s\n%s\n' "$arm_list" "$amd_list" | sed '/^$/d' | sort -u)"
+(
+  cd "$arm_app"
+  find . -type f -print | sort
+) > "$tmpdir/arm-files.txt"
+
+(
+  cd "$amd_app"
+  find . -type f -print | sort
+) > "$tmpdir/amd-files.txt"
+
+cat "$tmpdir/arm-files.txt" "$tmpdir/amd-files.txt" | sort -u > "$tmpdir/all-files.txt"
 
 merged=0
 skipped=0
@@ -93,7 +104,7 @@ while IFS= read -r rel; do
     fi
   fi
   skipped=$((skipped + 1))
-done <<< "$all_list"
+done < "$tmpdir/all-files.txt"
 
 /usr/libexec/PlistBuddy -c 'Set :LSMinimumSystemVersion 15.0' "$out_app/Contents/Info.plist"
 
