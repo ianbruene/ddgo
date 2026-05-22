@@ -38,6 +38,24 @@ mark_fail() {
   fail=$((fail + 1))
 }
 
+list_loaded_dylibs() {
+  local f="$1"
+  otool -l "$f" | awk '
+    /cmd LC_LOAD_DYLIB|cmd LC_LOAD_WEAK_DYLIB|cmd LC_REEXPORT_DYLIB|cmd LC_LOAD_UPWARD_DYLIB/ {
+      in_load = 1
+      next
+    }
+    in_load && /name / {
+      print $2
+      in_load = 0
+      next
+    }
+    /cmd LC_/ {
+      in_load = 0
+    }
+  '
+}
+
 if [[ ! -d "$app" ]]; then
   echo "app bundle not found: $app" >&2
   exit 1
@@ -128,32 +146,20 @@ while IFS= read -r -d '' f; do
     fi
   fi
 
-  file_info="$(file "$f")"
-  deps_start=2
-
-  # For Mach-O dylibs, framework binaries, and Qt plugins, the first
-  # otool -L entry is LC_ID_DYLIB: the file's own install name.
-  # It is not a dependency/load path and must not be treated as an
-  # unbundled Homebrew leak.
-  if echo "$file_info" | grep -q 'dynamically linked shared library'; then
-    deps_start=3
-  fi
-
-  while IFS= read -r dep; do
-    [[ -z "$dep" ]] && continue
-    dep_path="$(echo "$dep" | awk '{print $1}')"
+  while IFS= read -r dep_path; do
+    [[ -z "$dep_path" ]] && continue
     case "$dep_path" in
-      "$f"|@executable_path/*|@loader_path/*|@rpath/*|/System/Library/*|/usr/lib/*) ;;
+      @executable_path/*|@loader_path/*|@rpath/*|/System/Library/*|/usr/lib/*) ;;
       /usr/local/opt/qt@5/*|/opt/homebrew/opt/qt@5/*|/usr/local/Cellar/qt@5/*|/opt/homebrew/Cellar/qt@5/*)
         status="fail"
-        mark_fail "unbundled Homebrew Qt dependency path in $f: $dep_path"
+        mark_fail "unbundled Homebrew Qt loaded dependency path in $f: $dep_path"
         ;;
       *)
         status="fail"
-        mark_fail "disallowed dependency path in $f: $dep_path"
+        mark_fail "disallowed loaded dependency path in $f: $dep_path"
         ;;
     esac
-  done < <(otool -L "$f" | tail -n +"$deps_start")
+  done < <(list_loaded_dylibs "$f")
 
   dep_str="${dep_targets[*]:-none}"
   dep_str="${dep_str// /,}"
