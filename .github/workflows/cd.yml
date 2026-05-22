@@ -72,10 +72,16 @@ jobs:
           ditto dist/DDGo.app dist/macos-${{ matrix.slice }}/DDGo.app
       - name: Verify macOS app slice
         run: bash scripts/verify-macos-app.sh dist/macos-${{ matrix.slice }}/DDGo.app ${{ matrix.lipo_arch }} 15.0
+      - name: Archive macOS app slice
+        run: |
+          set -euo pipefail
+          mkdir -p dist/app-artifacts
+          tar -C dist/macos-${{ matrix.slice }} -czf dist/app-artifacts/DDGo-app-${{ matrix.slice }}.tar.gz DDGo.app
+          ls -lh dist/app-artifacts/DDGo-app-${{ matrix.slice }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: DDGo-app-${{ matrix.slice }}
-          path: dist/macos-${{ matrix.slice }}/DDGo.app
+          path: dist/app-artifacts/DDGo-app-${{ matrix.slice }}.tar.gz
 
   build-macos-universal:
     needs: [build-macos-slice]
@@ -90,12 +96,29 @@ jobs:
         with:
           name: DDGo-app-amd64
           path: slices/DDGo-app-amd64
+      - name: Extract macOS app slices
+        run: |
+          set -euo pipefail
+
+          echo "Downloaded artifact layout:"
+          find slices -maxdepth 5 -print | sort
+
+          mkdir -p slices/extracted/arm64 slices/extracted/amd64
+
+          tar -xzf slices/DDGo-app-arm64/DDGo-app-arm64.tar.gz -C slices/extracted/arm64
+          tar -xzf slices/DDGo-app-amd64/DDGo-app-amd64.tar.gz -C slices/extracted/amd64
+
+          test -d slices/extracted/arm64/DDGo.app
+          test -d slices/extracted/amd64/DDGo.app
+
+          echo "Extracted app layout:"
+          find slices/extracted -maxdepth 5 -print | sort | sed -n '1,200p'
       - name: Merge universal macOS app
         run: |
           set -euo pipefail
           bash scripts/merge-macos-universal.sh \
-            slices/DDGo-app-arm64/DDGo.app \
-            slices/DDGo-app-amd64/DDGo.app \
+            slices/extracted/arm64/DDGo.app \
+            slices/extracted/amd64/DDGo.app \
             dist/macos-universal/DDGo.app
       - name: Verify universal macOS app
         run: bash scripts/verify-macos-universal-app.sh dist/macos-universal/DDGo.app 15.0
