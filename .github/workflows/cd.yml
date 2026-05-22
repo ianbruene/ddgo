@@ -10,35 +10,22 @@ permissions:
   contents: read
 
 jobs:
-  build-macos:
+  build-macos-slice:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Intel macOS 14 uses GitHub's x64 macOS larger runner label.
-          # If this job fails before any steps/logs appear, the repo/account likely
-          # cannot allocate macos-14-large; do not debug package scripts from that signal.
-          - os: macos-14-large
-            arch: amd64
-            lipo_arch: x86_64
-            artifact_suffix: amd64
-            package_name: DDGo-macos-amd64
-            macos_min: "14.0"
+          - os: macos-15
+            arch: arm64
+            lipo_arch: arm64
+            slice: arm64
+            macos_min: "15.0"
 
-          # Intel macOS 15 artifact. This is a true macOS 15+ build, not a Sonoma build.
           - os: macos-15-intel
             arch: amd64
             lipo_arch: x86_64
-            artifact_suffix: amd64-macos15
-            package_name: DDGo-macos-amd64-macos15
+            slice: amd64
             macos_min: "15.0"
-
-          - os: macos-14
-            arch: arm64
-            lipo_arch: arm64
-            artifact_suffix: arm64
-            package_name: DDGo-macos-arm64
-            macos_min: "14.0"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -57,94 +44,68 @@ jobs:
           xcode-select -p
           clang --version
           brew --version
-          brew config
       - name: Install macOS dependencies
         run: |
           set -euo pipefail
           brew install qt@5 pkg-config
-      - name: Diagnose macOS Qt
+      - name: Build and package macOS app slice
         run: |
           set -euo pipefail
-          qt_prefix="$(brew --prefix qt@5)"
-          echo "qt_prefix=$qt_prefix"
-          echo "PATH=$PATH"
-          echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-}"
-          test -x "$qt_prefix/bin/macdeployqt"
-          "$qt_prefix/bin/qmake" -v || true
-          pkg-config --modversion Qt5Core Qt5Gui Qt5Widgets || true
-          pkg-config --cflags Qt5Core Qt5Gui Qt5Widgets || true
-          pkg-config --libs Qt5Core Qt5Gui Qt5Widgets || true
-          find "$qt_prefix" \( -name "QtCore" -o -name "QtGui" -o -name "QtWidgets" -o -name "libqcocoa.dylib" \) -print | while read -r f; do
-            echo "== $f"
-            file "$f" || true
-            lipo -archs "$f" || true
-            otool -L "$f" || true
-            otool -l "$f" | grep -A4 LC_BUILD_VERSION || true
-            otool -l "$f" | grep -A3 LC_VERSION_MIN_MACOSX || true
-          done
-      - name: Build macOS binary
-        run: |
-          set -euo pipefail
-          echo "Building for GOARCH=${{ matrix.arch }} on runner arch $(uname -m)"
-          echo "macOS runtime minimum target: ${{ matrix.macos_min }}"
-          echo "runner: ${{ matrix.os }}"
-          echo "artifact: ${{ matrix.package_name }}"
-          go env
           mkdir -p dist
+          export MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}"
           export PATH="$(brew --prefix qt@5)/bin:$PATH"
           export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-          export MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}"
-          GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 go build -tags "miqt serial" -trimpath -ldflags="-s -w" -o dist/ddgo-darwin-${{ matrix.artifact_suffix }} ./cmd/ddgo
-      - name: Package macOS DMG
-        run: |
-          set -euo pipefail
-          MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}" \
-            bash scripts/package-macos.sh \
-              ${{ matrix.arch }} \
-              dist/ddgo-darwin-${{ matrix.artifact_suffix }} \
-              dist/${{ matrix.package_name }}.dmg \
-              ${{ github.ref_name }}
-          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' dist/DDGo.app/Contents/Info.plist
-          ls -lah dist
-      - name: Upload packaged macOS DMG for testing
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ${{ matrix.package_name }}
-          if-no-files-found: ignore
-          path: dist/${{ matrix.package_name }}.dmg
-      - name: Diagnose packaged macOS app
-        if: always()
-        run: |
-          set -euo pipefail
-          if [[ -d dist/DDGo.app ]]; then
-            find dist/DDGo.app/Contents -maxdepth 5 -print | sort | sed -n '1,300p'
-            find dist/DDGo.app/Contents -type f -print0 | while IFS= read -r -d '' f; do
-              if file "$f" | grep -q 'Mach-O'; then
-                echo "== $f"
-                file "$f" || true
-                lipo -archs "$f" || true
-                otool -L "$f" || true
-                otool -l "$f" | grep -A4 LC_BUILD_VERSION || true
-                otool -l "$f" | grep -A3 LC_VERSION_MIN_MACOSX || true
-              fi
-            done
-          else
-            echo "dist/DDGo.app does not exist"
-          fi
-      - name: Verify macOS app bundle
-        run: bash scripts/verify-macos-app.sh dist/DDGo.app ${{ matrix.lipo_arch }} ${{ matrix.macos_min }}
-      - name: Intel compatibility blocker annotation
-        if: failure() && matrix.arch == 'amd64'
-        run: echo "::error::Intel macOS artifact is blocked because bundled Qt requires macOS <version>; need a compatible Qt 5 build or Intel macOS 14 runner."
+
+          GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 \
+            go build -tags "miqt serial" -trimpath -ldflags="-s -w" \
+            -o dist/ddgo-darwin-${{ matrix.slice }} \
+            ./cmd/ddgo
+
+          bash scripts/package-macos.sh \
+            ${{ matrix.arch }} \
+            dist/ddgo-darwin-${{ matrix.slice }} \
+            dist/tmp-${{ matrix.slice }}.dmg \
+            ${{ github.ref_name }}
+
+          rm -rf dist/macos-${{ matrix.slice }}
+          mkdir -p dist/macos-${{ matrix.slice }}
+          ditto dist/DDGo.app dist/macos-${{ matrix.slice }}/DDGo.app
+      - name: Verify macOS app slice
+        run: bash scripts/verify-macos-app.sh dist/macos-${{ matrix.slice }}/DDGo.app ${{ matrix.lipo_arch }} 15.0
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: debug-macos-${{ matrix.artifact_suffix }}
-          if-no-files-found: ignore
-          path: |
-            dist/DDGo.app
-            dist/${{ matrix.package_name }}.dmg
+          name: DDGo-app-${{ matrix.slice }}
+          path: dist/macos-${{ matrix.slice }}/DDGo.app
+
+  build-macos-universal:
+    needs: [build-macos-slice]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: DDGo-app-arm64
+          path: slices/DDGo-app-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: DDGo-app-amd64
+          path: slices/DDGo-app-amd64
+      - name: Merge universal macOS app
+        run: |
+          set -euo pipefail
+          bash scripts/merge-macos-universal.sh \
+            slices/DDGo-app-arm64/DDGo.app \
+            slices/DDGo-app-amd64/DDGo.app \
+            dist/macos-universal/DDGo.app
+      - name: Verify universal macOS app
+        run: bash scripts/verify-macos-universal-app.sh dist/macos-universal/DDGo.app 15.0
+      - name: Create universal macOS DMG
+        run: bash scripts/create-macos-dmg.sh dist/macos-universal/DDGo.app dist/DDGo-macos-universal.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DDGo-macos-universal
+          path: dist/DDGo-macos-universal.dmg
+
   build-windows:
     runs-on: windows-2022
     steps:
@@ -182,7 +143,7 @@ jobs:
 
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') && always() }}
-    needs: [build-macos, build-windows]
+    needs: [build-macos-universal, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -203,17 +164,15 @@ jobs:
         with:
           fail_on_unmatched_files: false
           body: |
-            ### macOS testing notes
+            ### macOS
 
-            This release may include partial single-architecture macOS artifacts:
+            `DDGo-macos-universal.dmg` is a universal macOS 15+ build containing both Apple Silicon (`arm64`) and Intel (`x86_64`) slices.
 
-            - `DDGo-macos-arm64.dmg`: Apple Silicon build, expected target macOS 14+.
-            - `DDGo-macos-amd64.dmg`: Intel macOS 14 build, only present when the `macos-14-large` runner is available.
-            - `DDGo-macos-amd64-macos15.dmg`: Intel build produced on macOS 15. This is for testing only and may require macOS 15+ because bundled Homebrew dependency dylibs can declare `minos 15.0`.
+            macOS 14 and earlier are no longer supported.
 
-            The macOS 15 Intel artifact should not be treated as the Sonoma-compatible Intel build.
+            ### Windows
+
+            `DDGo-windows-amd64.zip` contains the Windows executable and required Qt/MinGW runtime files. Extract the whole folder before running `DDGo.exe`.
           files: |
-            dist/DDGo-macos-amd64/DDGo-macos-amd64.dmg
-            dist/DDGo-macos-amd64-macos15/DDGo-macos-amd64-macos15.dmg
-            dist/DDGo-macos-arm64/DDGo-macos-arm64.dmg
+            dist/DDGo-macos-universal/DDGo-macos-universal.dmg
             dist/DDGo-windows-amd64/DDGo-windows-amd64.zip

@@ -22,7 +22,7 @@ if [[ ! -f "$bin_path" ]]; then
 fi
 
 qt_prefix="$(brew --prefix qt@5)"
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 export PATH="$qt_prefix/bin:$PATH"
 export PKG_CONFIG_PATH="$qt_prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
