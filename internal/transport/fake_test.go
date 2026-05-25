@@ -106,6 +106,33 @@ func TestFakeTransport_InjectError(t *testing.T) {
 	}
 }
 
+func TestFakeTransport_WrittenPayloadsAreCopied(t *testing.T) {
+	t.Parallel()
+
+	f := NewFakeTransport()
+	if err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	_ = waitForTransportEvent(t, f.Events(), EventConnected)
+
+	msg := NewRawMessage([]byte("ABC"), "ABC")
+	if err := f.Write(context.Background(), msg); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	msg.Payload[0] = 'Z'
+
+	got := f.Written()
+	if gotPayload := string(got[0].Payload); gotPayload != "ABC" {
+		t.Fatalf("Written payload after original mutation = %q, want %q", gotPayload, "ABC")
+	}
+
+	got[0].Payload[1] = 'Y'
+	gotAgain := f.Written()
+	if gotPayload := string(gotAgain[0].Payload); gotPayload != "ABC" {
+		t.Fatalf("Written payload after returned mutation = %q, want %q", gotPayload, "ABC")
+	}
+}
+
 func waitForTransportEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
