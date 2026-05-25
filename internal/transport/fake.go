@@ -59,7 +59,9 @@ func (f *FakeTransport) Write(_ context.Context, msg Message) error {
 	if f.writeErr != nil {
 		return f.writeErr
 	}
-	f.writes = append(f.writes, msg)
+	copied := msg
+	copied.Payload = append([]byte(nil), msg.Payload...)
+	f.writes = append(f.writes, copied)
 	f.events <- Event{Kind: EventTX, When: time.Now(), Text: msg.Display, Payload: append([]byte(nil), msg.Payload...)}
 	return nil
 }
@@ -79,5 +81,8 @@ func (f *FakeTransport) Written() []Message {
 	defer f.mu.Unlock()
 	out := make([]Message, len(f.writes))
 	copy(out, f.writes)
+	for i := range out {
+		out[i].Payload = append([]byte(nil), out[i].Payload...)
+	}
 	return out
 }

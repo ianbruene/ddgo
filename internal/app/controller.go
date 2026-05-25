@@ -204,7 +204,13 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 		c.emitError(err)
 		return err
 	}
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(ctx)
+	if err := runCtx.Err(); err != nil {
+		cancel()
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
 	run := &programRun{
 		program: c.loaded,
 		rxCh:    make(chan string, 64),
@@ -224,36 +230,50 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 
 func (c *Controller) PauseProgram(ctx context.Context) error {
 	c.mu.Lock()
-	if c.run == nil || c.state.ProgramStatus != ProgramRunning {
+	run := c.run
+	if run == nil || c.state.ProgramStatus != ProgramRunning {
 		c.mu.Unlock()
 		err := errors.New("program is not running")
 		c.emitError(err)
 		return err
 	}
-	c.state.ProgramStatus = ProgramPaused
-	state := c.state
 	c.mu.Unlock()
 	if err := c.writeProgramAction(ctx, grbl.ActionHold); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	if c.run != run || c.state.ProgramStatus != ProgramRunning {
+		c.mu.Unlock()
+		return nil
+	}
+	c.state.ProgramStatus = ProgramPaused
+	state := c.state
+	c.mu.Unlock()
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program paused"}
 	return nil
 }
 
 func (c *Controller) ResumeProgram(ctx context.Context) error {
 	c.mu.Lock()
-	if c.run == nil || c.state.ProgramStatus != ProgramPaused {
+	run := c.run
+	if run == nil || c.state.ProgramStatus != ProgramPaused {
 		c.mu.Unlock()
 		err := errors.New("program is not paused")
 		c.emitError(err)
 		return err
 	}
-	c.state.ProgramStatus = ProgramRunning
-	state := c.state
 	c.mu.Unlock()
 	if err := c.writeProgramAction(ctx, grbl.ActionResume); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	if c.run != run || c.state.ProgramStatus != ProgramPaused {
+		c.mu.Unlock()
+		return nil
+	}
+	c.state.ProgramStatus = ProgramRunning
+	state := c.state
+	c.mu.Unlock()
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program resumed"}
 	return nil
 }
@@ -402,6 +422,7 @@ func (c *Controller) runTransportEventBridge() {
 		case transport.EventTX:
 			c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
 		case transport.EventRX:
+			var overflowRun *programRun
 			c.mu.Lock()
 			if ms := grbl.ParseMachineState(ev.Text); ms != "" {
 				c.state.MachineState = ms
@@ -410,11 +431,14 @@ func (c *Controller) runTransportEventBridge() {
 				select {
 				case run.rxCh <- ev.Text:
 				default:
-					go func(ch chan string, text string) { ch <- text }(run.rxCh, ev.Text)
+					overflowRun = run
 				}
 			}
 			state := c.state
 			c.mu.Unlock()
+			if overflowRun != nil {
+				c.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
+			}
 			c.events <- Event{Kind: EventConsoleRX, When: ev.When, Text: ev.Text, State: state, Raw: ev}
 		case transport.EventError:
 			c.emitError(ev.Err)

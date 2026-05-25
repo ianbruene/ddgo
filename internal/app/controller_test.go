@@ -472,6 +472,117 @@ func TestControllerProgramFailureAndStartValidation(t *testing.T) {
 	}
 }
 
+func TestControllerStartProgramCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "canceled.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := controller.StartProgram(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("StartProgram() error = %v, want %v", err, context.Canceled)
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+	if got, want := controller.Snapshot().ProgramStatus, ProgramLoaded; got != want {
+		t.Fatalf("ProgramStatus = %q, want %q", got, want)
+	}
+	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
+}
+
+func TestControllerPauseResumeWriteFailureKeepsState(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "pause-fail.gcode", "G0 X1\nG0 X2\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program pause-fail.gcode")
+	waitForWrites(t, fake, 1)
+
+	wantErr := errors.New("hold failed")
+	fake.SetWriteError(wantErr)
+	if err := controller.PauseProgram(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("PauseProgram() error = %v, want %v", err, wantErr)
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+	if got, want := controller.Snapshot().ProgramStatus, ProgramRunning; got != want {
+		t.Fatalf("ProgramStatus after pause failure = %q, want %q", got, want)
+	}
+
+	fake.SetWriteError(nil)
+	if err := controller.PauseProgram(context.Background()); err != nil {
+		t.Fatalf("PauseProgram() retry error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "program paused")
+
+	wantErr = errors.New("resume failed")
+	fake.SetWriteError(wantErr)
+	if err := controller.ResumeProgram(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("ResumeProgram() error = %v, want %v", err, wantErr)
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+	if got, want := controller.Snapshot().ProgramStatus, ProgramPaused; got != want {
+		t.Fatalf("ProgramStatus after resume failure = %q, want %q", got, want)
+	}
+}
+
+func TestControllerProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "overflow.gcode", "G0 X1\nG0 X2\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program overflow.gcode")
+	waitForWrites(t, fake, 1)
+
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	if err := controller.PauseProgram(context.Background()); err != nil {
+		t.Fatalf("PauseProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "program paused")
+
+	for i := 0; i < 100; i++ {
+		fake.InjectRX("ok")
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	errEv := waitForEvent(t, controller.Events(), EventError)
+	if got, want := errEv.Text, "program response backlog full"; got != want {
+		t.Fatalf("error text = %q, want %q", got, want)
+	}
+}
+
 func writeProgramFile(t *testing.T, name string, contents string) string {
 	t.Helper()
 	path := t.TempDir() + "/" + name

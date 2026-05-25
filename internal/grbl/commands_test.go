@@ -1,6 +1,7 @@
 package grbl
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,10 @@ func TestBuildJog(t *testing.T) {
 		{name: "unsupported axis", axis: "A", delta: 1, feed: 100, wantErr: "unsupported jog axis"},
 		{name: "zero distance", axis: "X", delta: 0, feed: 100, wantErr: "jog distance must be non-zero"},
 		{name: "nonpositive feed", axis: "Z", delta: 1, feed: 0, wantErr: "jog feed must be greater than zero"},
+		{name: "nan distance", axis: "X", delta: math.NaN(), feed: 100, wantErr: "jog distance must be finite"},
+		{name: "inf distance", axis: "X", delta: math.Inf(1), feed: 100, wantErr: "jog distance must be finite"},
+		{name: "nan feed", axis: "X", delta: 1, feed: math.NaN(), wantErr: "jog feed must be finite"},
+		{name: "inf feed", axis: "X", delta: 1, feed: math.Inf(1), wantErr: "jog feed must be finite"},
 	}
 
 	for _, tt := range tests {

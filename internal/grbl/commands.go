@@ -28,8 +28,14 @@ func BuildJog(axis string, delta float64, feed float64) (transport.Message, erro
 	if math.Abs(delta) < 1e-12 {
 		return transport.Message{}, errors.New("jog distance must be non-zero")
 	}
+	if math.IsNaN(delta) || math.IsInf(delta, 0) {
+		return transport.Message{}, errors.New("jog distance must be finite")
+	}
 	if feed <= 0 {
 		return transport.Message{}, errors.New("jog feed must be greater than zero")
+	}
+	if math.IsNaN(feed) || math.IsInf(feed, 0) {
+		return transport.Message{}, errors.New("jog feed must be finite")
 	}
 	line := fmt.Sprintf("$J=G91 %s%.3f F%.0f", axis, delta, feed)
 	return transport.NewLineMessage(line), nil

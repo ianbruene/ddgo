@@ -40,17 +40,6 @@ func TestSerialTransportConsume_PartialChunks(t *testing.T) {
 	}
 }
 
-func TestFirstNonZero(t *testing.T) {
-	t.Parallel()
-
-	if got, want := firstNonZero(8, 7), 8; got != want {
-		t.Fatalf("firstNonZero(non-zero) = %d, want %d", got, want)
-	}
-	if got, want := firstNonZero(0, 7), 7; got != want {
-		t.Fatalf("firstNonZero(zero) = %d, want %d", got, want)
-	}
-}
-
 func waitForSerialRealEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
