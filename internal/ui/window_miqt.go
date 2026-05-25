@@ -77,7 +77,7 @@ func newWindow(controller *app.Controller) *Window {
 func (w *Window) build() {
 	w.window = qt.NewQMainWindow(nil)
 	w.window.SetWindowTitle("DDGo")
-	w.window.Resize(1180, 760)
+	w.window.Resize(1180, 640)
 
 	central := qt.NewQWidget(nil)
 	central.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
@@ -104,7 +104,12 @@ func (w *Window) build() {
 
 	right := qt.NewQWidget(nil)
 	right.SetLayout(qt.NewQVBoxLayout(nil).QLayout)
-	central.Layout().AddWidget(right)
+	right.SetMinimumWidth(320)
+
+	rightScroll := qt.NewQScrollArea(nil)
+	rightScroll.SetWidgetResizable(true)
+	rightScroll.SetWidget(right)
+	central.Layout().AddWidget(rightScroll.QWidget)
 
 	connectionGroup := groupBox("Connection")
 	right.Layout().AddWidget(connectionGroup.QWidget)
