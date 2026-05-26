@@ -111,8 +111,15 @@ func (w *Window) build() {
 	rightScroll.SetWidget(right)
 	central.Layout().AddWidget(rightScroll.QWidget)
 
+	controlsGridWidget := qt.NewQWidget(nil)
+	controlsGrid := qt.NewQGridLayout(nil)
+	controlsGrid.SetColumnStretch(0, 1)
+	controlsGrid.SetColumnStretch(1, 1)
+	controlsGridWidget.SetLayout(controlsGrid.QLayout)
+	right.Layout().AddWidget(controlsGridWidget)
+
 	connectionGroup := groupBox("Connection")
-	right.Layout().AddWidget(connectionGroup.QWidget)
+	controlsGrid.AddWidget2(connectionGroup.QWidget, 0, 0)
 	w.portCombo = qt.NewQComboBox(nil)
 	connectionGroup.Layout().AddWidget(label("Port").QWidget)
 	connectionGroup.Layout().AddWidget(w.portCombo.QWidget)
@@ -122,7 +129,7 @@ func (w *Window) build() {
 	connectionGroup.Layout().AddWidget(w.connectButton.QWidget)
 
 	programGroup := groupBox("Program")
-	right.Layout().AddWidget(programGroup.QWidget)
+	controlsGrid.AddWidget2(programGroup.QWidget, 0, 1)
 	programGroup.Layout().AddWidget(label("G-code file").QWidget)
 	pathRow := qt.NewQWidget(nil)
 	pathRow.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
@@ -143,7 +150,7 @@ func (w *Window) build() {
 	programGroup.Layout().AddWidget(w.stopButton.QWidget)
 
 	jogGroup := groupBox("Jog")
-	right.Layout().AddWidget(jogGroup.QWidget)
+	controlsGrid.AddWidget2(jogGroup.QWidget, 1, 0)
 
 	rowY := qt.NewQWidget(nil)
 	rowY.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
@@ -184,7 +191,7 @@ func (w *Window) build() {
 	jogGroup.Layout().AddWidget(w.feedCombo.QWidget)
 
 	actionsGroup := groupBox("Machine Actions")
-	right.Layout().AddWidget(actionsGroup.QWidget)
+	controlsGrid.AddWidget2(actionsGroup.QWidget, 1, 1)
 	w.unlockButton = button("Unlock")
 	w.homeButton = button("Home")
 	w.resetButton = button("Soft Reset")
