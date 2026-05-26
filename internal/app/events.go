@@ -39,15 +39,23 @@ func (s ProgramStatus) IsActive() bool {
 }
 
 type State struct {
-	Connected       bool
-	PortName        string
-	MachineState    string
-	LastError       string
-	ProgramPath     string
-	ProgramName     string
-	ProgramStatus   ProgramStatus
-	ProgramTotal    int
-	ProgramComplete int
+	Connected          bool
+	PortName           string
+	MachineState       string
+	MachinePosition    [3]float64
+	HasMachinePosition bool
+	WorkPosition       [3]float64
+	HasWorkPosition    bool
+	Feed               float64
+	Spindle            float64
+	HasFeedSpindle     bool
+	LastStatusRaw      string
+	LastError          string
+	ProgramPath        string
+	ProgramName        string
+	ProgramStatus      ProgramStatus
+	ProgramTotal       int
+	ProgramComplete    int
 }
 
 type Event struct {

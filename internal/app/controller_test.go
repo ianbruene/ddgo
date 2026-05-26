@@ -68,6 +68,7 @@ func TestControllerConnectSendJogActionAndReceive(t *testing.T) {
 
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	cfg := transport.DefaultPortConfig("/dev/ttyACM0")
 
 	if err := controller.Connect(context.Background(), cfg); err != nil {
@@ -159,6 +160,7 @@ func TestControllerDisconnect(t *testing.T) {
 
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
@@ -253,6 +255,7 @@ func TestControllerTransportErrorAndRXHandling(t *testing.T) {
 
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
@@ -273,6 +276,76 @@ func TestControllerTransportErrorAndRXHandling(t *testing.T) {
 	if got, want := controller.Snapshot().LastError, transportErr.Error(); got != want {
 		t.Fatalf("LastError = %q, want %q", got, want)
 	}
+}
+
+func TestControllerStatusPollingStartsAndStops(t *testing.T) {
+	t.Parallel()
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 20 * time.Millisecond
+
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	waitForStatusQueryWrite(t, fake, 500*time.Millisecond)
+
+	if err := controller.Disconnect(); err != nil {
+		t.Fatalf("Disconnect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	before := countStatusWrites(fake.Written())
+	time.Sleep(120 * time.Millisecond)
+	after := countStatusWrites(fake.Written())
+	if after != before {
+		t.Fatalf("status writes after disconnect changed from %d to %d", before, after)
+	}
+}
+
+func TestControllerStatusReportUpdatesState(t *testing.T) {
+	t.Parallel()
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	line := "<Run|MPos:1.000,2.000,3.000|WPos:4.000,5.000,6.000|FS:500,12000>"
+	fake.InjectRX(line)
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
+
+	state := controller.Snapshot()
+	if state.MachineState != "Run" || !state.HasMachinePosition || !state.HasWorkPosition || !state.HasFeedSpindle {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+	if state.LastStatusRaw != line {
+		t.Fatalf("LastStatusRaw = %q, want %q", state.LastStatusRaw, line)
+	}
+}
+
+func waitForStatusQueryWrite(t *testing.T, fake *transport.FakeTransport, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countStatusWrites(fake.Written()) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for status query write")
+}
+
+func countStatusWrites(writes []transport.Message) int {
+	count := 0
+	for _, write := range writes {
+		if string(write.Payload) == "?" {
+			count++
+		}
+	}
+	return count
 }
 
 func waitForEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
