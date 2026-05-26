@@ -4,10 +4,23 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/ianbruene/ddgo/internal/transport"
 )
+
+type StatusReport struct {
+	Raw     string
+	State   string
+	MPos    [3]float64
+	HasMPos bool
+	WPos    [3]float64
+	HasWPos bool
+	Feed    float64
+	Spindle float64
+	HasFS   bool
+}
 
 type Action string
 
@@ -61,14 +74,88 @@ func BuildAction(action Action) (transport.Message, error) {
 }
 
 func ParseMachineState(line string) string {
+	report, ok := ParseStatusReport(line)
+	if !ok {
+		return ""
+	}
+	return report.State
+}
+
+func ParseStatusReport(line string) (StatusReport, bool) {
 	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "<") || !strings.HasSuffix(line, ">") {
-		return ""
+	if line == "" || !strings.HasPrefix(line, "<") || !strings.HasSuffix(line, ">") {
+		return StatusReport{}, false
 	}
-	line = strings.TrimSuffix(strings.TrimPrefix(line, "<"), ">")
-	parts := strings.SplitN(line, "|", 2)
+	body := strings.TrimSuffix(strings.TrimPrefix(line, "<"), ">")
+	parts := strings.Split(body, "|")
 	if len(parts) == 0 {
-		return ""
+		return StatusReport{}, false
 	}
-	return strings.TrimSpace(parts[0])
+	report := StatusReport{Raw: line, State: strings.TrimSpace(parts[0])}
+	if report.State == "" {
+		return StatusReport{}, false
+	}
+	for _, part := range parts[1:] {
+		key, value, ok := strings.Cut(part, ":")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "MPos":
+			coords, ok := parseCoordTriple(value)
+			if !ok {
+				return StatusReport{}, false
+			}
+			report.MPos = coords
+			report.HasMPos = true
+		case "WPos":
+			coords, ok := parseCoordTriple(value)
+			if !ok {
+				return StatusReport{}, false
+			}
+			report.WPos = coords
+			report.HasWPos = true
+		case "FS":
+			feed, spindle, ok := parseFeedSpindle(value)
+			if !ok {
+				return StatusReport{}, false
+			}
+			report.Feed = feed
+			report.Spindle = spindle
+			report.HasFS = true
+		}
+	}
+	return report, true
+}
+
+func parseCoordTriple(value string) ([3]float64, bool) {
+	values := strings.Split(value, ",")
+	if len(values) != 3 {
+		return [3]float64{}, false
+	}
+	var coords [3]float64
+	for i := range coords {
+		v, err := strconv.ParseFloat(strings.TrimSpace(values[i]), 64)
+		if err != nil {
+			return [3]float64{}, false
+		}
+		coords[i] = v
+	}
+	return coords, true
+}
+
+func parseFeedSpindle(value string) (float64, float64, bool) {
+	values := strings.Split(value, ",")
+	if len(values) != 2 {
+		return 0, 0, false
+	}
+	feed, err := strconv.ParseFloat(strings.TrimSpace(values[0]), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	spindle, err := strconv.ParseFloat(strings.TrimSpace(values[1]), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return feed, spindle, true
 }

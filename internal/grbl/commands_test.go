@@ -118,3 +118,44 @@ func TestParseMachineState(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStatusReport(t *testing.T) {
+	t.Parallel()
+
+	report, ok := ParseStatusReport("<Idle|MPos:0.000,1.000,-2.500|FS:0,0>")
+	if !ok {
+		t.Fatal("ParseStatusReport() ok=false, want true")
+	}
+	if got, want := report.State, "Idle"; got != want {
+		t.Fatalf("State = %q, want %q", got, want)
+	}
+	if !report.HasMPos || report.MPos != [3]float64{0, 1, -2.5} {
+		t.Fatalf("MPos parse mismatch: %+v", report)
+	}
+	if !report.HasFS || report.Feed != 0 || report.Spindle != 0 {
+		t.Fatalf("FS parse mismatch: %+v", report)
+	}
+
+	report, ok = ParseStatusReport("<Run|WPos:10.000,20.000,-1.000|FS:500,12000>")
+	if !ok || !report.HasWPos || !report.HasFS {
+		t.Fatalf("WPos/FS parse failed: %+v ok=%v", report, ok)
+	}
+	if got, want := report.WPos, [3]float64{10, 20, -1}; got != want {
+		t.Fatalf("WPos = %v, want %v", got, want)
+	}
+	if got, want := report.Feed, 500.0; got != want {
+		t.Fatalf("Feed = %v, want %v", got, want)
+	}
+	if got, want := report.Spindle, 12000.0; got != want {
+		t.Fatalf("Spindle = %v, want %v", got, want)
+	}
+}
+
+func TestParseStatusReportInvalid(t *testing.T) {
+	t.Parallel()
+	for _, line := range []string{"ok", "error:2", "", "<>", "<Idle|MPos:1,2>", "<Idle|FS:100>", "<Idle|WPos:a,b,c>"} {
+		if _, ok := ParseStatusReport(line); ok {
+			t.Fatalf("ParseStatusReport(%q) ok=true, want false", line)
+		}
+	}
+}

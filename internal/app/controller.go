@@ -16,6 +16,8 @@ import (
 
 var ErrProgramActive = errors.New("program is running; manual controls are disabled")
 
+const defaultStatusPollInterval = 500 * time.Millisecond
+
 type programRun struct {
 	program gcode.Program
 	rxCh    chan string
@@ -23,21 +25,25 @@ type programRun struct {
 }
 
 type Controller struct {
-	mu        sync.RWMutex
-	transport transport.Transport
-	listPorts ports.ListFunc
-	events    chan Event
-	state     State
-	loaded    gcode.Program
-	run       *programRun
+	mu                 sync.RWMutex
+	transport          transport.Transport
+	listPorts          ports.ListFunc
+	events             chan Event
+	state              State
+	loaded             gcode.Program
+	run                *programRun
+	statusPollCancel   context.CancelFunc
+	statusPollDone     chan struct{}
+	statusPollInterval time.Duration
 }
 
 func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller {
 	c := &Controller{
-		transport: t,
-		listPorts: listPorts,
-		events:    make(chan Event, 1024),
-		state:     State{ProgramStatus: ProgramNotLoaded},
+		transport:          t,
+		listPorts:          listPorts,
+		events:             make(chan Event, 1024),
+		state:              State{ProgramStatus: ProgramNotLoaded},
+		statusPollInterval: defaultStatusPollInterval,
 	}
 	go c.runTransportEventBridge()
 	return c
@@ -88,6 +94,7 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 	c.state.PortName = cfg.Name
 	c.state.LastError = ""
 	state := c.state
+	c.startStatusPollingLocked()
 	c.mu.Unlock()
 
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: fmt.Sprintf("connected to %s", cfg.Name)}
@@ -99,6 +106,7 @@ func (c *Controller) Disconnect() error {
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
 	}
+	c.stopStatusPolling()
 	if err := c.transport.Close(); err != nil {
 		c.emitError(err)
 		return err
@@ -107,6 +115,10 @@ func (c *Controller) Disconnect() error {
 	c.mu.Lock()
 	c.state.Connected = false
 	c.state.MachineState = ""
+	c.state.HasMachinePosition = false
+	c.state.HasWorkPosition = false
+	c.state.HasFeedSpindle = false
+	c.state.LastStatusRaw = ""
 	state := c.state
 	c.mu.Unlock()
 
@@ -137,6 +149,72 @@ func (c *Controller) Jog(ctx context.Context, axis string, delta float64, feed f
 		return err
 	}
 	if err := c.transport.Write(ctx, msg); err != nil {
+		c.emitError(err)
+		return err
+	}
+	return nil
+}
+
+func (c *Controller) startStatusPollingLocked() {
+	if c.statusPollCancel != nil || !c.state.Connected {
+		return
+	}
+	pollCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.statusPollCancel = cancel
+	c.statusPollDone = done
+	interval := c.statusPollInterval
+	go c.pollStatusLoop(pollCtx, done, interval)
+}
+
+func (c *Controller) stopStatusPolling() {
+	c.mu.Lock()
+	cancel := c.statusPollCancel
+	done := c.statusPollDone
+	c.statusPollCancel = nil
+	c.statusPollDone = nil
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (c *Controller) pollStatusLoop(ctx context.Context, done chan struct{}, interval time.Duration) {
+	defer close(done)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.writeStatusPoll(ctx); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (c *Controller) writeStatusPoll(ctx context.Context) error {
+	c.mu.RLock()
+	connected := c.state.Connected
+	c.mu.RUnlock()
+	if !connected {
+		return nil
+	}
+	msg, err := grbl.BuildAction(grbl.ActionStatus)
+	if err != nil {
+		return err
+	}
+	if err := c.transport.Write(ctx, msg); err != nil {
+		if errors.Is(err, transport.ErrNotOpen) {
+			return nil
+		}
 		c.emitError(err)
 		return err
 	}
@@ -423,8 +501,22 @@ func (c *Controller) runTransportEventBridge() {
 			c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
 		case transport.EventRX:
 			c.mu.Lock()
-			if ms := grbl.ParseMachineState(ev.Text); ms != "" {
-				c.state.MachineState = ms
+			if report, ok := grbl.ParseStatusReport(ev.Text); ok {
+				c.state.MachineState = report.State
+				c.state.LastStatusRaw = report.Raw
+				if report.HasMPos {
+					c.state.MachinePosition = report.MPos
+					c.state.HasMachinePosition = true
+				}
+				if report.HasWPos {
+					c.state.WorkPosition = report.WPos
+					c.state.HasWorkPosition = true
+				}
+				if report.HasFS {
+					c.state.Feed = report.Feed
+					c.state.Spindle = report.Spindle
+					c.state.HasFeedSpindle = true
+				}
 			}
 			overflowRun := c.deliverProgramResponseLocked(ev.Text)
 			state := c.state

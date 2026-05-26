@@ -51,6 +51,9 @@ type Window struct {
 	statusButton    *qt.QPushButton
 	connStatus      *qt.QLabel
 	machineStatus   *qt.QLabel
+	machinePos      *qt.QLabel
+	workPos         *qt.QLabel
+	feedSpindle     *qt.QLabel
 	programStatus   *qt.QLabel
 	programProgress *qt.QLabel
 	lastErrorLabel  *qt.QLabel
@@ -206,10 +209,13 @@ func (w *Window) build() {
 	right.Layout().AddWidget(statusGroup.QWidget)
 	w.connStatus = qt.NewQLabel(nil)
 	w.machineStatus = qt.NewQLabel(nil)
+	w.machinePos = qt.NewQLabel(nil)
+	w.workPos = qt.NewQLabel(nil)
+	w.feedSpindle = qt.NewQLabel(nil)
 	w.programStatus = qt.NewQLabel(nil)
 	w.programProgress = qt.NewQLabel(nil)
 	w.lastErrorLabel = qt.NewQLabel(nil)
-	for _, lbl := range []*qt.QLabel{w.connStatus, w.machineStatus, w.programStatus, w.programProgress, w.lastErrorLabel} {
+	for _, lbl := range []*qt.QLabel{w.connStatus, w.machineStatus, w.machinePos, w.workPos, w.feedSpindle, w.programStatus, w.programProgress, w.lastErrorLabel} {
 		statusGroup.Layout().AddWidget(lbl.QWidget)
 	}
 
@@ -357,6 +363,21 @@ func (w *Window) applyState(state app.State) {
 		machine = "unknown"
 	}
 	w.machineStatus.SetText("Machine: " + machine)
+	if state.HasMachinePosition {
+		w.machinePos.SetText(fmt.Sprintf("MPos: X%.3f, Y%.3f, Z%.3f", state.MachinePosition[0], state.MachinePosition[1], state.MachinePosition[2]))
+	} else {
+		w.machinePos.SetText("MPos: unknown")
+	}
+	if state.HasWorkPosition {
+		w.workPos.SetText(fmt.Sprintf("WPos: X%.3f, Y%.3f, Z%.3f", state.WorkPosition[0], state.WorkPosition[1], state.WorkPosition[2]))
+	} else {
+		w.workPos.SetText("WPos: unknown")
+	}
+	if state.HasFeedSpindle {
+		w.feedSpindle.SetText(fmt.Sprintf("Feed: %.0f  Spindle: %.0f", state.Feed, state.Spindle))
+	} else {
+		w.feedSpindle.SetText("Feed: unknown  Spindle: unknown")
+	}
 	if state.ProgramPath != "" && strings.TrimSpace(w.programPath.Text()) == "" {
 		w.programPath.SetText(state.ProgramPath)
 	}
