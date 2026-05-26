@@ -422,18 +422,11 @@ func (c *Controller) runTransportEventBridge() {
 		case transport.EventTX:
 			c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
 		case transport.EventRX:
-			var overflowRun *programRun
 			c.mu.Lock()
 			if ms := grbl.ParseMachineState(ev.Text); ms != "" {
 				c.state.MachineState = ms
 			}
-			if run := c.run; run != nil && isProgramResponse(ev.Text) {
-				select {
-				case run.rxCh <- ev.Text:
-				default:
-					overflowRun = run
-				}
-			}
+			overflowRun := c.deliverProgramResponseLocked(ev.Text)
 			state := c.state
 			c.mu.Unlock()
 			if overflowRun != nil {
@@ -443,6 +436,19 @@ func (c *Controller) runTransportEventBridge() {
 		case transport.EventError:
 			c.emitError(ev.Err)
 		}
+	}
+}
+
+func (c *Controller) deliverProgramResponseLocked(line string) *programRun {
+	run := c.run
+	if run == nil || !isProgramResponse(line) {
+		return nil
+	}
+	select {
+	case run.rxCh <- line:
+		return nil
+	default:
+		return run
 	}
 }
 
