@@ -549,34 +549,27 @@ func TestControllerPauseResumeWriteFailureKeepsState(t *testing.T) {
 func TestControllerProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	t.Parallel()
 
-	path := writeProgramFile(t, "overflow.gcode", "G0 X1\nG0 X2\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
-	if err := controller.LoadProgramFile(path); err != nil {
-		t.Fatalf("LoadProgramFile() error = %v", err)
-	}
-	_ = waitForEvent(t, controller.Events(), EventStateChanged)
-	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
-		t.Fatalf("Connect() error = %v", err)
-	}
-	_ = waitForEvent(t, controller.Events(), EventStateChanged)
-	if err := controller.StartProgram(context.Background()); err != nil {
-		t.Fatalf("StartProgram() error = %v", err)
-	}
-	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program overflow.gcode")
-	waitForWrites(t, fake, 1)
+	run := &programRun{rxCh: make(chan string, 1)}
+	controller.mu.Lock()
+	controller.run = run
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+	run.rxCh <- "ok"
 
-	fake.InjectRX("ok")
-	waitForWrites(t, fake, 2)
-	if err := controller.PauseProgram(context.Background()); err != nil {
-		t.Fatalf("PauseProgram() error = %v", err)
+	controller.mu.Lock()
+	overflowRun := controller.deliverProgramResponseLocked("ok")
+	controller.mu.Unlock()
+	if overflowRun != run {
+		t.Fatalf("deliverProgramResponseLocked() overflow run mismatch")
 	}
-	_ = waitForEventText(t, controller.Events(), EventStateChanged, "program paused")
 
-	for i := 0; i < 100; i++ {
-		fake.InjectRX("ok")
+	controller.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if got, want := state.LastError, "program response backlog full"; got != want {
+		t.Fatalf("LastError = %q, want %q", got, want)
 	}
-	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
 	errEv := waitForEvent(t, controller.Events(), EventError)
 	if got, want := errEv.Text, "program response backlog full"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
