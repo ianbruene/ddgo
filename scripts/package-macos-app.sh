@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
 if [[ $# -lt 3 ]]; then
   echo "usage: $0 <arm64|amd64> <input-binary> <output-app> [version]" >&2
@@ -66,10 +66,18 @@ file "$app_dir/Contents/MacOS/ddgo"
 lipo -archs "$app_dir/Contents/MacOS/ddgo"
 otool -L "$app_dir/Contents/MacOS/ddgo"
 
+echo "qt_prefix=$qt_prefix"
+echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
+echo "PATH=$PATH"
+echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+"$qt_prefix/bin/macdeployqt" -version || true
+otool -L "$app_dir/Contents/MacOS/ddgo"
+
 "$qt_prefix/bin/macdeployqt" "$app_dir" -verbose=2
 
-find "$app_dir/Contents" -type f | sort
-find "$app_dir/Contents" -name 'libqcocoa.dylib' -print
+find "$app_dir/Contents" -maxdepth 5 -print | sort
+find "$app_dir/Contents" -type f -name "*.dylib" -print | sort
+find "$app_dir/Contents" -type f -name "libqcocoa.dylib" -print
 test -f "$app_dir/Contents/PlugIns/platforms/libqcocoa.dylib"
 
 codesign --force --deep --sign - "$app_dir"
