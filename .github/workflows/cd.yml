@@ -52,8 +52,12 @@ jobs:
         run: |
           set -euxo pipefail
           export MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}"
-          export PATH="$(brew --prefix qt@5)/bin:$PATH"
-          export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          qt_prefix="$(brew --prefix qt@5)"
+          export PATH="${qt_prefix}/bin:$PATH"
+          export PKG_CONFIG_PATH="${qt_prefix}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export CGO_CFLAGS="-I${qt_prefix}/include ${CGO_CFLAGS:-}"
+          export CGO_CXXFLAGS="-I${qt_prefix}/include ${CGO_CXXFLAGS:-}"
+          export CGO_LDFLAGS="-F${qt_prefix}/lib -L${qt_prefix}/lib ${CGO_LDFLAGS:-}"
 
           echo "RUNNER_OS=$RUNNER_OS"
           echo "RUNNER_ARCH=$RUNNER_ARCH"
@@ -63,7 +67,9 @@ jobs:
           clang --version
           brew --prefix
           brew --prefix qt@5
-          qt_prefix="$(brew --prefix qt@5)"
+          echo "CGO_CFLAGS=$CGO_CFLAGS"
+          echo "CGO_CXXFLAGS=$CGO_CXXFLAGS"
+          echo "CGO_LDFLAGS=$CGO_LDFLAGS"
           pkg-config --modversion Qt5Core
           pkg-config --modversion Qt5Widgets
           qmake -query || true
@@ -74,9 +80,14 @@ jobs:
           set -euxo pipefail
           mkdir -p dist
           export MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos_min }}"
-          export PATH="$(brew --prefix qt@5)/bin:$PATH"
-          export PKG_CONFIG_PATH="$(brew --prefix qt@5)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          qt_prefix="$(brew --prefix qt@5)"
+          export PATH="${qt_prefix}/bin:$PATH"
+          export PKG_CONFIG_PATH="${qt_prefix}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export CGO_CFLAGS="-I${qt_prefix}/include ${CGO_CFLAGS:-}"
+          export CGO_CXXFLAGS="-I${qt_prefix}/include ${CGO_CXXFLAGS:-}"
+          export CGO_LDFLAGS="-F${qt_prefix}/lib -L${qt_prefix}/lib ${CGO_LDFLAGS:-}"
 
+          go clean -cache
           GOOS=darwin GOARCH=${{ matrix.arch }} CGO_ENABLED=1 \
             go build -x -tags "miqt serial" -trimpath -ldflags="-s -w" \
             -o dist/ddgo-darwin-${{ matrix.slice }} \
