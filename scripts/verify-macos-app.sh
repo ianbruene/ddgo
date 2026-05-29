@@ -26,6 +26,7 @@ PY
 app="$1"
 expected="$2"
 max_minos="$3"
+homebrew_qt_formula="qt@5"
 plist="$app/Contents/Info.plist"
 exe="$app/Contents/MacOS/ddgo"
 
@@ -150,7 +151,7 @@ while IFS= read -r -d '' f; do
     [[ -z "$dep_path" ]] && continue
     case "$dep_path" in
       @executable_path/*|@loader_path/*|@rpath/*|/System/Library/*|/usr/lib/*) ;;
-      /usr/local/opt/qt@5/*|/opt/homebrew/opt/qt@5/*|/usr/local/Cellar/qt@5/*|/opt/homebrew/Cellar/qt@5/*)
+      /usr/local/opt/qt@5/*|/opt/homebrew/opt/qt@5/*|/usr/local/Cellar/${homebrew_qt_formula}/*|/opt/homebrew/Cellar/${homebrew_qt_formula}/*)
         status="fail"
         mark_fail "unbundled Homebrew Qt loaded dependency path in $f: $dep_path"
         ;;
