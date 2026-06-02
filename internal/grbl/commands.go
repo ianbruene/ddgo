@@ -31,6 +31,7 @@ const (
 	ActionResume    Action = "resume"
 	ActionStatus    Action = "status"
 	ActionSoftReset Action = "soft_reset"
+	ActionJogCancel Action = "jog_cancel"
 )
 
 func BuildJog(axis string, delta float64, feed float64) (transport.Message, error) {
@@ -54,6 +55,24 @@ func BuildJog(axis string, delta float64, feed float64) (transport.Message, erro
 	return transport.NewLineMessage(line), nil
 }
 
+func BuildMachineJog(axis string, target float64, feed float64) (transport.Message, error) {
+	axis = strings.ToUpper(strings.TrimSpace(axis))
+	if axis != "X" && axis != "Y" && axis != "Z" {
+		return transport.Message{}, fmt.Errorf("unsupported jog axis %q", axis)
+	}
+	if math.IsNaN(target) || math.IsInf(target, 0) {
+		return transport.Message{}, errors.New("jog target must be finite")
+	}
+	if feed <= 0 {
+		return transport.Message{}, errors.New("jog feed must be greater than zero")
+	}
+	if math.IsNaN(feed) || math.IsInf(feed, 0) {
+		return transport.Message{}, errors.New("jog feed must be finite")
+	}
+	line := fmt.Sprintf("$J=G53 G90 %s%.3f F%.0f", axis, target, feed)
+	return transport.NewLineMessage(line), nil
+}
+
 func BuildAction(action Action) (transport.Message, error) {
 	switch action {
 	case ActionUnlock:
@@ -68,6 +87,8 @@ func BuildAction(action Action) (transport.Message, error) {
 		return transport.NewRawMessage([]byte("?"), "?"), nil
 	case ActionSoftReset:
 		return transport.NewRawMessage([]byte{0x18}, "Ctrl-X"), nil
+	case ActionJogCancel:
+		return transport.NewRawMessage([]byte{0x85}, "Jog Cancel"), nil
 	default:
 		return transport.Message{}, fmt.Errorf("unsupported action %q", action)
 	}

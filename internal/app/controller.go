@@ -155,6 +155,40 @@ func (c *Controller) Jog(ctx context.Context, axis string, delta float64, feed f
 	return nil
 }
 
+func (c *Controller) JogTo(ctx context.Context, axis string, target float64, feed float64) error {
+	if c.Snapshot().ProgramStatus.IsActive() {
+		c.emitError(ErrProgramActive)
+		return ErrProgramActive
+	}
+	msg, err := grbl.BuildMachineJog(axis, target, feed)
+	if err != nil {
+		c.emitError(err)
+		return err
+	}
+	if err := c.transport.Write(ctx, msg); err != nil {
+		c.emitError(err)
+		return err
+	}
+	return nil
+}
+
+func (c *Controller) StopMotion(ctx context.Context) error {
+	if c.Snapshot().ProgramStatus.IsActive() {
+		c.emitError(ErrProgramActive)
+		return ErrProgramActive
+	}
+	msg, err := grbl.BuildAction(grbl.ActionJogCancel)
+	if err != nil {
+		c.emitError(err)
+		return err
+	}
+	if err := c.transport.Write(ctx, msg); err != nil {
+		c.emitError(err)
+		return err
+	}
+	return nil
+}
+
 func (c *Controller) startStatusPollingLocked() {
 	if c.statusPollCancel != nil || !c.state.Connected {
 		return
