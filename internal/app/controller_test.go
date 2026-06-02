@@ -127,6 +127,91 @@ func TestControllerConnectSendJogActionAndReceive(t *testing.T) {
 	}
 }
 
+func TestControllerJogToWritesMachineJog(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.JogTo(context.Background(), "x", -300, 500); err != nil {
+		t.Fatalf("JogTo() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventConsoleTX)
+
+	written := fake.Written()
+	if got, want := len(written), 1; got != want {
+		t.Fatalf("len(written) = %d, want %d", got, want)
+	}
+	if got, want := written[0].Display, "$J=G53 G90 X-300.000 F500"; got != want {
+		t.Fatalf("written[0].Display = %q, want %q", got, want)
+	}
+	if got, want := string(written[0].Payload), "$J=G53 G90 X-300.000 F500\n"; got != want {
+		t.Fatalf("written[0].Payload = %q, want %q", got, want)
+	}
+}
+
+func TestControllerStopMotionWritesJogCancel(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.StopMotion(context.Background()); err != nil {
+		t.Fatalf("StopMotion() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventConsoleTX)
+
+	written := fake.Written()
+	if got, want := len(written), 1; got != want {
+		t.Fatalf("len(written) = %d, want %d", got, want)
+	}
+	if got, want := written[0].Display, "Jog Cancel"; got != want {
+		t.Fatalf("written[0].Display = %q, want %q", got, want)
+	}
+	if got, want := string(written[0].Payload), string([]byte{0x85}); got != want {
+		t.Fatalf("written[0].Payload = %q, want %q", got, want)
+	}
+}
+
+func TestControllerJogToAndStopMotionBlockedWhileProgramActive(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	controller.mu.Lock()
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+
+	if err := controller.JogTo(context.Background(), "X", -300, 500); !errors.Is(err, ErrProgramActive) {
+		t.Fatalf("JogTo() error = %v, want %v", err, ErrProgramActive)
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+	if err := controller.StopMotion(context.Background()); !errors.Is(err, ErrProgramActive) {
+		t.Fatalf("StopMotion() error = %v, want %v", err, ErrProgramActive)
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+
+	if got := len(fake.Written()); got != 0 {
+		t.Fatalf("len(written) = %d, want 0", got)
+	}
+}
+
 func TestControllerConnectValidationAndOpenError(t *testing.T) {
 	t.Parallel()
 

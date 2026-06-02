@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,38 +27,48 @@ type Window struct {
 	commandEntry *qt.QLineEdit
 	sendButton   *qt.QPushButton
 
-	portCombo       *qt.QComboBox
-	refreshButton   *qt.QPushButton
-	connectButton   *qt.QPushButton
-	programPath     *qt.QLineEdit
-	browseButton    *qt.QPushButton
-	runButton       *qt.QPushButton
-	pauseButton     *qt.QPushButton
-	resumeButton    *qt.QPushButton
-	stopButton      *qt.QPushButton
-	stepCombo       *qt.QComboBox
-	feedCombo       *qt.QComboBox
-	jogXPButton     *qt.QPushButton
-	jogXMButton     *qt.QPushButton
-	jogYPButton     *qt.QPushButton
-	jogYMButton     *qt.QPushButton
-	jogZPButton     *qt.QPushButton
-	jogZMButton     *qt.QPushButton
-	unlockButton    *qt.QPushButton
-	homeButton      *qt.QPushButton
-	resetButton     *qt.QPushButton
-	holdButton      *qt.QPushButton
-	resumeActBtn    *qt.QPushButton
-	statusButton    *qt.QPushButton
-	connStatus      *qt.QLabel
-	machineStatus   *qt.QLabel
-	machinePos      *qt.QLabel
-	workPos         *qt.QLabel
-	feedSpindle     *qt.QLabel
-	programStatus   *qt.QLabel
-	programProgress *qt.QLabel
-	lastErrorLabel  *qt.QLabel
-	pollTimer       *qt.QTimer
+	portCombo        *qt.QComboBox
+	refreshButton    *qt.QPushButton
+	connectButton    *qt.QPushButton
+	programPath      *qt.QLineEdit
+	browseButton     *qt.QPushButton
+	runButton        *qt.QPushButton
+	pauseButton      *qt.QPushButton
+	resumeButton     *qt.QPushButton
+	stopButton       *qt.QPushButton
+	stepCombo        *qt.QComboBox
+	feedCombo        *qt.QComboBox
+	xTravel          *qt.QLineEdit
+	yTravel          *qt.QLineEdit
+	zTravel          *qt.QLineEdit
+	jogXPButton      *qt.QPushButton
+	jogXMButton      *qt.QPushButton
+	jogYPButton      *qt.QPushButton
+	jogYMButton      *qt.QPushButton
+	jogZPButton      *qt.QPushButton
+	jogZMButton      *qt.QPushButton
+	jogToXPButton    *qt.QPushButton
+	jogToXMButton    *qt.QPushButton
+	jogToYPButton    *qt.QPushButton
+	jogToYMButton    *qt.QPushButton
+	jogToZPButton    *qt.QPushButton
+	jogToZMButton    *qt.QPushButton
+	stopMotionButton *qt.QPushButton
+	unlockButton     *qt.QPushButton
+	homeButton       *qt.QPushButton
+	resetButton      *qt.QPushButton
+	holdButton       *qt.QPushButton
+	resumeActBtn     *qt.QPushButton
+	statusButton     *qt.QPushButton
+	connStatus       *qt.QLabel
+	machineStatus    *qt.QLabel
+	machinePos       *qt.QLabel
+	workPos          *qt.QLabel
+	feedSpindle      *qt.QLabel
+	programStatus    *qt.QLabel
+	programProgress  *qt.QLabel
+	lastErrorLabel   *qt.QLabel
+	pollTimer        *qt.QTimer
 }
 
 func Run(controller *app.Controller) error {
@@ -193,6 +204,48 @@ func (w *Window) build() {
 	w.feedCombo.SetCurrentText("500")
 	jogGroup.Layout().AddWidget(w.feedCombo.QWidget)
 
+	jogGroup.Layout().AddWidget(label("Machine travel (mm)").QWidget)
+	travelRow := qt.NewQWidget(nil)
+	travelRow.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
+	jogGroup.Layout().AddWidget(travelRow)
+	w.xTravel = qt.NewQLineEdit(nil)
+	w.xTravel.SetText("300")
+	w.xTravel.SetPlaceholderText("X travel")
+	w.yTravel = qt.NewQLineEdit(nil)
+	w.yTravel.SetText("180")
+	w.yTravel.SetPlaceholderText("Y travel")
+	w.zTravel = qt.NewQLineEdit(nil)
+	w.zTravel.SetText("50")
+	w.zTravel.SetPlaceholderText("Z travel")
+	travelRow.Layout().AddWidget(label("X").QWidget)
+	travelRow.Layout().AddWidget(w.xTravel.QWidget)
+	travelRow.Layout().AddWidget(label("Y").QWidget)
+	travelRow.Layout().AddWidget(w.yTravel.QWidget)
+	travelRow.Layout().AddWidget(label("Z").QWidget)
+	travelRow.Layout().AddWidget(w.zTravel.QWidget)
+
+	jogGroup.Layout().AddWidget(label("Jog to Axis End").QWidget)
+	endRowXY := qt.NewQWidget(nil)
+	endRowXY.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
+	jogGroup.Layout().AddWidget(endRowXY)
+	w.jogToXMButton = button("X- End")
+	w.jogToXPButton = button("X+ End")
+	w.jogToYMButton = button("Y- End")
+	w.jogToYPButton = button("Y+ End")
+	endRowXY.Layout().AddWidget(w.jogToXMButton.QWidget)
+	endRowXY.Layout().AddWidget(w.jogToXPButton.QWidget)
+	endRowXY.Layout().AddWidget(w.jogToYMButton.QWidget)
+	endRowXY.Layout().AddWidget(w.jogToYPButton.QWidget)
+	endRowZ := qt.NewQWidget(nil)
+	endRowZ.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
+	jogGroup.Layout().AddWidget(endRowZ)
+	w.jogToZMButton = button("Z- End")
+	w.jogToZPButton = button("Z+ End")
+	endRowZ.Layout().AddWidget(w.jogToZMButton.QWidget)
+	endRowZ.Layout().AddWidget(w.jogToZPButton.QWidget)
+	w.stopMotionButton = button("Stop Movement")
+	jogGroup.Layout().AddWidget(w.stopMotionButton.QWidget)
+
 	actionsGroup := groupBox("Machine Actions")
 	controlsGrid.AddWidget2(actionsGroup.QWidget, 1, 1)
 	w.unlockButton = button("Unlock")
@@ -242,6 +295,13 @@ func (w *Window) bind() {
 	w.jogYMButton.OnClicked(func() { w.jog("Y", -1) })
 	w.jogZPButton.OnClicked(func() { w.jog("Z", +1) })
 	w.jogZMButton.OnClicked(func() { w.jog("Z", -1) })
+	w.jogToXPButton.OnClicked(func() { w.jogToEnd("X", +1) })
+	w.jogToXMButton.OnClicked(func() { w.jogToEnd("X", -1) })
+	w.jogToYPButton.OnClicked(func() { w.jogToEnd("Y", +1) })
+	w.jogToYMButton.OnClicked(func() { w.jogToEnd("Y", -1) })
+	w.jogToZPButton.OnClicked(func() { w.jogToEnd("Z", +1) })
+	w.jogToZMButton.OnClicked(func() { w.jogToEnd("Z", -1) })
+	w.stopMotionButton.OnClicked(func() { go func() { _ = w.controller.StopMotion(context.Background()) }() })
 	w.unlockButton.OnClicked(func() { w.action(grbl.ActionUnlock) })
 	w.homeButton.OnClicked(func() { w.action(grbl.ActionHome) })
 	w.resetButton.OnClicked(func() { w.action(grbl.ActionSoftReset) })
@@ -303,6 +363,76 @@ func (w *Window) jog(axis string, direction float64) {
 		return
 	}
 	go func() { _ = w.controller.Jog(context.Background(), axis, step*direction, feed) }()
+}
+
+func (w *Window) jogToEnd(axis string, direction float64) {
+	feed, ok := w.parsePositiveFloat(w.feedCombo.CurrentText(), "feed")
+	if !ok {
+		return
+	}
+	travel, ok := w.axisTravel(axis)
+	if !ok {
+		return
+	}
+	idx := axisIndex(axis)
+	if idx < 0 {
+		w.appendConsole("ERR", fmt.Sprintf("unsupported jog axis %q", axis))
+		return
+	}
+	state := w.controller.Snapshot()
+	if !state.HasMachinePosition {
+		w.appendConsole("ERR", "machine position is unknown; wait for a status report before jog-to-end")
+		return
+	}
+	target := -travel
+	if direction > 0 {
+		target = 0
+	}
+	if math.Abs(state.MachinePosition[idx]-target) <= 0.001 {
+		w.appendConsole("SYS", fmt.Sprintf("%s axis is already at %.3f mm", strings.ToUpper(axis), target))
+		return
+	}
+	go func() { _ = w.controller.JogTo(context.Background(), axis, target, feed) }()
+}
+
+func (w *Window) parsePositiveFloat(text, name string) (float64, bool) {
+	value, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	if err != nil {
+		w.appendConsole("ERR", fmt.Sprintf("invalid %s: %v", name, err))
+		return 0, false
+	}
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		w.appendConsole("ERR", fmt.Sprintf("invalid %s: must be a finite value greater than zero", name))
+		return 0, false
+	}
+	return value, true
+}
+
+func (w *Window) axisTravel(axis string) (float64, bool) {
+	switch strings.ToUpper(strings.TrimSpace(axis)) {
+	case "X":
+		return w.parsePositiveFloat(w.xTravel.Text(), "X travel")
+	case "Y":
+		return w.parsePositiveFloat(w.yTravel.Text(), "Y travel")
+	case "Z":
+		return w.parsePositiveFloat(w.zTravel.Text(), "Z travel")
+	default:
+		w.appendConsole("ERR", fmt.Sprintf("unsupported jog axis %q", axis))
+		return 0, false
+	}
+}
+
+func axisIndex(axis string) int {
+	switch strings.ToUpper(strings.TrimSpace(axis)) {
+	case "X":
+		return 0
+	case "Y":
+		return 1
+	case "Z":
+		return 2
+	default:
+		return -1
+	}
 }
 
 func (w *Window) action(action grbl.Action) {
@@ -409,9 +539,17 @@ func (w *Window) applyState(state app.State) {
 	w.commandEntry.SetEnabled(canManual)
 	w.stepCombo.SetEnabled(canManual)
 	w.feedCombo.SetEnabled(canManual)
+	for _, input := range []*qt.QLineEdit{w.xTravel, w.yTravel, w.zTravel} {
+		input.SetEnabled(canManual)
+	}
 	for _, btn := range []*qt.QPushButton{w.jogXPButton, w.jogXMButton, w.jogYPButton, w.jogYMButton, w.jogZPButton, w.jogZMButton, w.unlockButton, w.homeButton, w.resetButton, w.holdButton, w.resumeActBtn, w.statusButton} {
 		btn.SetEnabled(canManual)
 	}
+	canJogToEnd := canManual && state.HasMachinePosition
+	for _, btn := range []*qt.QPushButton{w.jogToXPButton, w.jogToXMButton, w.jogToYPButton, w.jogToYMButton, w.jogToZPButton, w.jogToZMButton} {
+		btn.SetEnabled(canJogToEnd)
+	}
+	w.stopMotionButton.SetEnabled(canManual)
 }
 
 func (w *Window) appendConsole(prefix string, text string) {

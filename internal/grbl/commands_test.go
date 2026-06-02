@@ -56,6 +56,55 @@ func TestBuildJog(t *testing.T) {
 	}
 }
 
+func TestBuildMachineJog(t *testing.T) {
+	t.Parallel()
+
+	msg, err := BuildMachineJog("x", -300, 500)
+	if err != nil {
+		t.Fatalf("BuildMachineJog() error = %v", err)
+	}
+	if got, want := msg.Display, "$J=G53 G90 X-300.000 F500"; got != want {
+		t.Fatalf("Display = %q, want %q", got, want)
+	}
+	if got, want := string(msg.Payload), "$J=G53 G90 X-300.000 F500\n"; got != want {
+		t.Fatalf("Payload = %q, want %q", got, want)
+	}
+}
+
+func TestBuildMachineJogRejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		axis    string
+		target  float64
+		feed    float64
+		wantErr string
+	}{
+		{name: "invalid axis", axis: "A", target: -300, feed: 500, wantErr: "unsupported jog axis"},
+		{name: "nan target", axis: "X", target: math.NaN(), feed: 500, wantErr: "jog target must be finite"},
+		{name: "inf target", axis: "X", target: math.Inf(1), feed: 500, wantErr: "jog target must be finite"},
+		{name: "zero feed", axis: "X", target: -300, feed: 0, wantErr: "jog feed must be greater than zero"},
+		{name: "negative feed", axis: "X", target: -300, feed: -1, wantErr: "jog feed must be greater than zero"},
+		{name: "nan feed", axis: "X", target: -300, feed: math.NaN(), wantErr: "jog feed must be finite"},
+		{name: "inf feed", axis: "X", target: -300, feed: math.Inf(1), wantErr: "jog feed must be finite"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := BuildMachineJog(tt.axis, tt.target, tt.feed)
+			if err == nil {
+				t.Fatalf("BuildMachineJog() error = nil, want substring %q", tt.wantErr)
+			}
+			if got := err.Error(); !strings.Contains(got, tt.wantErr) {
+				t.Fatalf("BuildMachineJog() error = %q, want substring %q", got, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestBuildAction(t *testing.T) {
 	t.Parallel()
 
@@ -70,6 +119,7 @@ func TestBuildAction(t *testing.T) {
 		{action: ActionResume, wantDisplay: "~", wantPayload: "~"},
 		{action: ActionStatus, wantDisplay: "?", wantPayload: "?"},
 		{action: ActionSoftReset, wantDisplay: "Ctrl-X", wantPayload: string([]byte{0x18})},
+		{action: ActionJogCancel, wantDisplay: "Jog Cancel", wantPayload: string([]byte{0x85})},
 	}
 
 	for _, tt := range tests {
