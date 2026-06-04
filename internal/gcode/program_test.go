@@ -15,7 +15,43 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	want := []Line{{Number: 3, Text: "G21"}, {Number: 4, Text: "G90"}, {Number: 5, Text: "G0 X1 Y2"}, {Number: 6, Text: "M3 S1000"}}
+	want := []Line{{Number: 3, Raw: "G21", Text: "G21"}, {Number: 4, Raw: "G90 ; abs", Text: "G90"}, {Number: 5, Raw: "G0 X1 Y2 (move)", Text: "G0 X1 Y2"}, {Number: 6, Raw: "M3 (spindle) S1000", Text: "M3 S1000"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParsePreservesRawAndCleanedCompatibility(t *testing.T) {
+	t.Parallel()
+
+	src := "  G1   X1   Y2   (move); trailing comment  \nM999X1Y2 ; macro comment\n"
+	got, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got[0].Raw != "G1   X1   Y2   (move); trailing comment" {
+		t.Fatalf("Raw = %q", got[0].Raw)
+	}
+	if got[0].Text != "G1 X1 Y2" {
+		t.Fatalf("Text = %q, want sanitized output", got[0].Text)
+	}
+	if got[1].Raw != "M999X1Y2 ; macro comment" {
+		t.Fatalf("Raw = %q", got[1].Raw)
+	}
+	if got[1].Text != "M999X1Y2" {
+		t.Fatalf("Text = %q, want compact sanitized output", got[1].Text)
+	}
+}
+
+func TestParseRawPreservesParenthesesSemicolonsAndLineNumbers(t *testing.T) {
+	t.Parallel()
+
+	src := "\n(comment only)\nG90 (absolute)\n; comment only\nG0 X1 ; semicolon comment\n"
+	got, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := []Line{{Number: 3, Raw: "G90 (absolute)", Text: "G90"}, {Number: 5, Raw: "G0 X1 ; semicolon comment", Text: "G0 X1"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse() = %#v, want %#v", got, want)
 	}
