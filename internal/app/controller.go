@@ -10,6 +10,7 @@ import (
 
 	"github.com/ianbruene/ddgo/internal/gcode"
 	"github.com/ianbruene/ddgo/internal/grbl"
+	"github.com/ianbruene/ddgo/internal/macro"
 	"github.com/ianbruene/ddgo/internal/ports"
 	"github.com/ianbruene/ddgo/internal/transport"
 )
@@ -35,6 +36,12 @@ type Controller struct {
 	statusPollCancel   context.CancelFunc
 	statusPollDone     chan struct{}
 	statusPollInterval time.Duration
+	macroEngine        *macro.Engine
+	motionRewriter     macro.MotionRewriter
+	variables          *macro.VariableStore
+	contour            *macro.ContourState
+	lastProbe          macro.Point
+	hasLastProbe       bool
 }
 
 func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller {
@@ -44,6 +51,8 @@ func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller 
 		events:             make(chan Event, 1024),
 		state:              State{ProgramStatus: ProgramNotLoaded},
 		statusPollInterval: defaultStatusPollInterval,
+		variables:          macro.NewVariableStore(),
+		contour:            macro.NewContourState(),
 	}
 	go c.runTransportEventBridge()
 	return c
@@ -51,6 +60,18 @@ func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller 
 
 func (c *Controller) Events() <-chan Event {
 	return c.events
+}
+
+func (c *Controller) SetMacroEngine(engine *macro.Engine) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.macroEngine = engine
+}
+
+func (c *Controller) SetMotionRewriter(rewriter macro.MotionRewriter) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.motionRewriter = rewriter
 }
 
 func (c *Controller) Snapshot() State {
@@ -421,32 +442,82 @@ func (c *Controller) runProgram(ctx context.Context, run *programRun) {
 		if err := c.waitUntilRunnable(ctx, run); err != nil {
 			return
 		}
-		msg := transport.NewLineMessage(line.Text)
-		if err := c.transport.Write(ctx, msg); err != nil {
-			c.finishProgramFailure(run, fmt.Errorf("send line %d: %w", line.Number, err))
-			return
-		}
-		for {
-			select {
-			case <-ctx.Done():
+
+		c.mu.RLock()
+		engine := c.macroEngine
+		rewriter := c.motionRewriter
+		c.mu.RUnlock()
+
+		if engine != nil {
+			handled, err := engine.Dispatch(ctx, c, line)
+			if err != nil {
+				c.finishProgramFailure(run, err)
 				return
-			case rx := <-run.rxCh:
-				status := classifyProgramResponse(rx)
-				switch status {
-				case responseIgnore:
-					continue
-				case responseOK:
-					c.updateProgramProgress(run, idx+1)
-					goto nextLine
-				case responseFail:
-					c.finishProgramFailure(run, fmt.Errorf("program failed at line %d: %s", line.Number, strings.TrimSpace(rx)))
-					return
-				}
+			}
+			if handled {
+				c.updateProgramProgress(run, idx+1)
+				continue
 			}
 		}
-	nextLine:
+
+		outgoing := line.Text
+		if rewriter != nil {
+			rewritten, changed, err := rewriter.RewriteMotion(ctx, c, line)
+			if err != nil {
+				c.finishProgramFailure(run, fmt.Errorf("rewrite line %d: %w", line.Number, err))
+				return
+			}
+			if changed {
+				outgoing = rewritten
+			}
+		}
+
+		if err := c.sendLineAndWaitOK(ctx, run, outgoing, line.Number); err != nil {
+			c.finishProgramFailure(run, err)
+			return
+		}
+		c.updateProgramProgress(run, idx+1)
 	}
 	c.finishProgramSuccess(run)
+}
+
+func (c *Controller) SendLineAndWaitOK(ctx context.Context, line string) error {
+	c.mu.RLock()
+	run := c.run
+	c.mu.RUnlock()
+	if run == nil {
+		return errors.New("no active program run")
+	}
+	return c.sendLineAndWaitOK(ctx, run, line, 0)
+}
+
+func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, line string, sourceLine int) error {
+	msg := transport.NewLineMessage(line)
+	if err := c.transport.Write(ctx, msg); err != nil {
+		if sourceLine > 0 {
+			return fmt.Errorf("send line %d: %w", sourceLine, err)
+		}
+		return fmt.Errorf("send macro line: %w", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case rx := <-run.rxCh:
+			status := classifyProgramResponse(rx)
+			switch status {
+			case responseIgnore:
+				continue
+			case responseOK:
+				return nil
+			case responseFail:
+				if sourceLine > 0 {
+					return fmt.Errorf("program failed at line %d: %s", sourceLine, strings.TrimSpace(rx))
+				}
+				return fmt.Errorf("macro command failed: %s", strings.TrimSpace(rx))
+			}
+		}
+	}
 }
 
 func (c *Controller) waitUntilRunnable(ctx context.Context, run *programRun) error {
@@ -511,6 +582,52 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program failed"}
 	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
 }
+
+func (c *Controller) ReadWCSOffsets(ctx context.Context) (macro.WCSOffsets, error) {
+	return nil, errors.New("read WCS offsets is not available yet")
+}
+
+func (c *Controller) WriteWCSOffset(ctx context.Context, wcs macro.WCS, axis macro.Axis, value float64) error {
+	line, err := macro.BuildWCSWrite(wcs, axis, value)
+	if err != nil {
+		return err
+	}
+	return c.SendLineAndWaitOK(ctx, line)
+}
+
+func (c *Controller) CurrentMachinePosition() (macro.Point, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.state.HasMachinePosition {
+		return macro.Point{}, false
+	}
+	p := c.state.MachinePosition
+	return macro.Point{X: p[0], Y: p[1], Z: p[2]}, true
+}
+
+func (c *Controller) CurrentWorkPosition() (macro.Point, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.state.HasWorkPosition {
+		return macro.Point{}, false
+	}
+	p := c.state.WorkPosition
+	return macro.Point{X: p[0], Y: p[1], Z: p[2]}, true
+}
+
+func (c *Controller) LastProbePoint() (macro.Point, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastProbe, c.hasLastProbe
+}
+
+func (c *Controller) RunProbe(ctx context.Context, args string) (macro.Point, error) {
+	return macro.Point{}, errors.New("run probe is not available yet")
+}
+
+func (c *Controller) Variables() *macro.VariableStore { return c.variables }
+
+func (c *Controller) Contour() *macro.ContourState { return c.contour }
 
 func (c *Controller) writeProgramAction(ctx context.Context, action grbl.Action) error {
 	msg, err := grbl.BuildAction(action)

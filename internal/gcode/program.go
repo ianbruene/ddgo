@@ -11,6 +11,7 @@ import (
 
 type Line struct {
 	Number int
+	Raw    string
 	Text   string
 }
 
@@ -46,11 +47,12 @@ func Parse(src string) ([]Line, error) {
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
-		line := sanitizeLine(scanner.Text())
+		raw := normalizeRawLine(scanner.Text())
+		line := sanitizeLine(raw)
 		if line == "" {
 			continue
 		}
-		out = append(out, Line{Number: lineNo, Text: line})
+		out = append(out, Line{Number: lineNo, Raw: raw, Text: line})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scan program: %w", err)
@@ -61,8 +63,12 @@ func Parse(src string) ([]Line, error) {
 	return out, nil
 }
 
-func sanitizeLine(line string) string {
+func normalizeRawLine(line string) string {
 	line = strings.TrimPrefix(line, "\ufeff")
+	return strings.TrimSpace(line)
+}
+
+func sanitizeLine(line string) string {
 	line = stripParenComments(line)
 	if idx := strings.IndexByte(line, ';'); idx >= 0 {
 		line = line[:idx]

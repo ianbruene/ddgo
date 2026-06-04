@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ianbruene/ddgo/internal/gcode"
 	"github.com/ianbruene/ddgo/internal/grbl"
+	"github.com/ianbruene/ddgo/internal/macro"
 	"github.com/ianbruene/ddgo/internal/ports"
 	"github.com/ianbruene/ddgo/internal/transport"
 )
@@ -793,5 +795,208 @@ func waitForEventText(t *testing.T, ch <-chan Event, kind EventKind, text string
 		case <-deadline:
 			t.Fatalf("timed out waiting for event kind %q with text %q", kind, text)
 		}
+	}
+}
+
+type testRewriter struct {
+	line string
+	err  error
+}
+
+func (r testRewriter) RewriteMotion(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+	if r.err != nil {
+		return "", false, r.err
+	}
+	return r.line, true, nil
+}
+
+func TestControllerUnregisteredMCodePassesThrough(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "unregistered-m.gcode", "M42 P1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.SetMacroEngine(macro.NewEngine(macro.NewRegistry()))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program unregistered-m.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "M42 P1"; got != want {
+		t.Fatalf("written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerRegisteredMacroInterceptsAndAdvances(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "registered-m.gcode", "M42 P1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	reg := macro.NewRegistry()
+	called := false
+	reg.Register(42, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
+		called = true
+		if inv.RawArgs != "P1" || inv.CleanArgs != "P1" {
+			t.Fatalf("args = %q/%q", inv.RawArgs, inv.CleanArgs)
+		}
+		return nil
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program registered-m.gcode")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+	if !called {
+		t.Fatal("handler was not called")
+	}
+	if got := len(fake.Written()); got != 0 {
+		t.Fatalf("len(written) = %d, want 0", got)
+	}
+}
+
+func TestControllerMacroFailureMarksProgramFailed(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "macro-fail.gcode", "M77\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	reg := macro.NewRegistry()
+	reg.Register(77, macro.HandlerFunc(func(context.Context, macro.Runtime, macro.Invocation) error {
+		return errors.New("macro condition failed")
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-fail.gcode")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if want := "macro M77 failed at line 1: macro condition failed"; state.LastError != want {
+		t.Fatalf("LastError = %q, want %q", state.LastError, want)
+	}
+	errEv := waitForEvent(t, controller.Events(), EventError)
+	if errEv.Text != state.LastError {
+		t.Fatalf("error event text = %q, want %q", errEv.Text, state.LastError)
+	}
+}
+
+func TestControllerMacroHandlerCanSendControllerLines(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "macro-send.gcode", "M88\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	reg := macro.NewRegistry()
+	reg.Register(88, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
+		if err := runtime.SendLineAndWaitOK(ctx, "G0 X1"); err != nil {
+			return err
+		}
+		return runtime.SendLineAndWaitOK(ctx, "G0 Y2")
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-send.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+		t.Fatalf("first write = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	if got, want := fake.Written()[1].Display, "G0 Y2"; got != want {
+		t.Fatalf("second write = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerMotionRewrite(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "rewrite.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.SetMotionRewriter(testRewriter{line: "G0 X2"})
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program rewrite.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G0 X2"; got != want {
+		t.Fatalf("written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerMotionRewriteErrorFailsProgram(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "rewrite-fail.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.SetMotionRewriter(testRewriter{err: errors.New("surface missing")})
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program rewrite-fail.gcode")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if got, want := state.LastError, "rewrite line 1: surface missing"; got != want {
+		t.Fatalf("LastError = %q, want %q", got, want)
+	}
+	if got := len(fake.Written()); got != 0 {
+		t.Fatalf("len(written) = %d, want 0", got)
 	}
 }
