@@ -65,6 +65,36 @@ func TestParseInvocation(t *testing.T) {
 	}
 }
 
+func TestRegistryZeroValue(t *testing.T) {
+	t.Parallel()
+	var reg Registry
+
+	reg.Register(42, HandlerFunc(func(context.Context, Runtime, Invocation) error {
+		return nil
+	}))
+
+	handler, ok := reg.Handler(42)
+	if !ok {
+		t.Fatal("Handler ok = false")
+	}
+	if handler == nil {
+		t.Fatal("Handler = nil")
+	}
+
+	reg.Register(43, nil)
+	if handler, ok := reg.Handler(43); ok || handler != nil {
+		t.Fatalf("nil handler registered: handler=%v ok=%v", handler, ok)
+	}
+
+	var nilReg *Registry
+	nilReg.Register(44, HandlerFunc(func(context.Context, Runtime, Invocation) error {
+		return nil
+	}))
+	if handler, ok := nilReg.Handler(44); ok || handler != nil {
+		t.Fatalf("nil registry returned handler=%v ok=%v", handler, ok)
+	}
+}
+
 func TestRegistryAndDispatch(t *testing.T) {
 	t.Parallel()
 	reg := NewRegistry()
@@ -111,6 +141,41 @@ func TestDispatchErrorPropagation(t *testing.T) {
 	}
 }
 
+func TestVariableStoreZeroValue(t *testing.T) {
+	t.Parallel()
+	var vars VariableStore
+
+	vars.Set("foo", 12.5)
+	value, ok := vars.Get("foo")
+	if !ok {
+		t.Fatal("Get ok = false")
+	}
+	if value != 12.5 {
+		t.Fatalf("Get value = %v, want 12.5", value)
+	}
+
+	snap := vars.Snapshot()
+	if got, ok := snap["foo"]; !ok || got != 12.5 {
+		t.Fatalf("Snapshot[foo] = %v,%v; want 12.5,true", got, ok)
+	}
+	snap["foo"] = 99
+	if got, _ := vars.Get("foo"); got != 12.5 {
+		t.Fatalf("snapshot mutated store: %v", got)
+	}
+
+	vars.Delete("foo")
+	if got, ok := vars.Get("foo"); ok {
+		t.Fatalf("Get after Delete = %v,%v; want ok=false", got, ok)
+	}
+
+	vars.Delete("missing")
+	vars.Set("bar", 3.25)
+	vars.Clear()
+	if got := vars.Snapshot(); len(got) != 0 {
+		t.Fatalf("Snapshot after Clear = %#v", got)
+	}
+}
+
 func TestVariableStore(t *testing.T) {
 	t.Parallel()
 	store := NewVariableStore()
@@ -131,6 +196,29 @@ func TestVariableStore(t *testing.T) {
 	store.Clear()
 	if got := store.Snapshot(); len(got) != 0 {
 		t.Fatalf("Snapshot after Clear = %#v", got)
+	}
+}
+
+func TestContourStateZeroValue(t *testing.T) {
+	t.Parallel()
+	var contour ContourState
+
+	if err := contour.AddPoint(Point{X: 1, Y: 2, Z: 3}); err != nil {
+		t.Fatalf("AddPoint() error = %v", err)
+	}
+	if got := contour.Points(); !reflect.DeepEqual(got, []Point{{X: 1, Y: 2, Z: 3}}) {
+		t.Fatalf("Points() = %#v", got)
+	}
+	if err := contour.Enable(); err == nil {
+		t.Fatal("Enable() with insufficient points error = nil")
+	}
+
+	contour.Clear()
+	if got := contour.Points(); len(got) != 0 {
+		t.Fatalf("Points() after Clear = %#v", got)
+	}
+	if contour.Enabled() {
+		t.Fatal("Enabled() after Clear = true")
 	}
 }
 

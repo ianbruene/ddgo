@@ -101,12 +101,19 @@ type Registry struct {
 
 func NewRegistry() *Registry { return &Registry{handlers: make(map[int]Handler)} }
 
+func (r *Registry) ensureHandlersLocked() {
+	if r.handlers == nil {
+		r.handlers = make(map[int]Handler)
+	}
+}
+
 func (r *Registry) Register(code int, handler Handler) {
 	if r == nil || handler == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.ensureHandlersLocked()
 	r.handlers[code] = handler
 }
 
@@ -172,9 +179,15 @@ type VariableStore struct {
 }
 
 func NewVariableStore() *VariableStore { return &VariableStore{values: make(map[string]float64)} }
+func (s *VariableStore) ensureValuesLocked() {
+	if s.values == nil {
+		s.values = make(map[string]float64)
+	}
+}
 func (s *VariableStore) Set(name string, value float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureValuesLocked()
 	s.values[name] = value
 }
 func (s *VariableStore) Get(name string) (float64, bool) {
