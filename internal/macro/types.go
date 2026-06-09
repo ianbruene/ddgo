@@ -90,7 +90,12 @@ type Handler interface {
 
 type HandlerFunc func(ctx context.Context, runtime Runtime, inv Invocation) error
 
+var ErrNilHandlerFunc = errors.New("nil macro handler function")
+
 func (f HandlerFunc) HandleMacro(ctx context.Context, runtime Runtime, inv Invocation) error {
+	if f == nil {
+		return ErrNilHandlerFunc
+	}
 	return f(ctx, runtime, inv)
 }
 
