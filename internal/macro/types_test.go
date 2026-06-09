@@ -124,6 +124,31 @@ func TestRegistryAndDispatch(t *testing.T) {
 	}
 }
 
+func TestNilHandlerFuncReturnsError(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+
+	var handler HandlerFunc
+	reg.Register(42, handler)
+
+	handled, err := NewEngine(reg).Dispatch(
+		context.Background(),
+		&fakeRuntime{},
+		gcode.Line{Number: 7, Raw: "M42", Text: "M42"},
+	)
+
+	if !handled {
+		t.Fatal("handled = false")
+	}
+	if err == nil {
+		t.Fatal("err = nil")
+	}
+	if !errors.Is(err, ErrNilHandlerFunc) {
+		t.Fatalf("err = %v, want %v", err, ErrNilHandlerFunc)
+	}
+}
+
 func TestDispatchErrorPropagation(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("boom")
