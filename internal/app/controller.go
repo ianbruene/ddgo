@@ -353,6 +353,7 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 	c.state.ProgramStatus = ProgramRunning
 	c.state.ProgramComplete = 0
 	c.state.LastError = ""
+	c.contour.Disable()
 	state := c.state
 	c.mu.Unlock()
 
@@ -576,6 +577,7 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 		c.run = nil
 		c.state.ProgramStatus = ProgramFailed
 		c.state.LastError = err.Error()
+		c.contour.Disable()
 	}
 	state := c.state
 	c.mu.Unlock()
