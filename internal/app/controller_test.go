@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -519,6 +520,101 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 	}
 }
 
+func TestControllerStartProgramDisablesContourPreservesPoints(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "contour-start.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	wantPoints := enableTestContour(t, controller)
+	if !controller.Contour().Enabled() {
+		t.Fatal("contour enabled before start = false, want true")
+	}
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program contour-start.gcode")
+	if controller.Contour().Enabled() {
+		t.Fatal("contour enabled after successful start = true, want false")
+	}
+	if got := controller.Contour().Points(); !reflect.DeepEqual(got, wantPoints) {
+		t.Fatalf("contour points after start = %+v, want %+v", got, wantPoints)
+	}
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+		t.Fatalf("first written display = %q, want %q", got, want)
+	}
+}
+
+func TestControllerFailedStartDoesNotDisableContour(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
+	wantPoints := enableTestContour(t, controller)
+	if err := controller.StartProgram(context.Background()); err == nil {
+		t.Fatal("StartProgram() without load/connect error = nil, want non-nil")
+	}
+	_ = waitForEvent(t, controller.Events(), EventError)
+	if !controller.Contour().Enabled() {
+		t.Fatal("contour enabled after failed start = false, want true")
+	}
+	if got := controller.Contour().Points(); !reflect.DeepEqual(got, wantPoints) {
+		t.Fatalf("contour points after failed start = %+v, want %+v", got, wantPoints)
+	}
+}
+
+func TestControllerProgramFailureDisablesContourPreservesPoints(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "contour-failure.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	wantPoints := enableTestContour(t, controller)
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program contour-failure.gcode")
+	waitForWrites(t, fake, 1)
+	if err := controller.Contour().Enable(); err != nil {
+		t.Fatalf("Contour().Enable() after start error = %v", err)
+	}
+
+	fake.InjectRX("error:2")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if controller.Contour().Enabled() {
+		t.Fatal("contour enabled after program failure = true, want false")
+	}
+	if got := controller.Contour().Points(); !reflect.DeepEqual(got, wantPoints) {
+		t.Fatalf("contour points after program failure = %+v, want %+v", got, wantPoints)
+	}
+	if got, want := state.LastError, "program failed at line 1: error:2"; got != want {
+		t.Fatalf("LastError = %q, want %q", got, want)
+	}
+	errEv := waitForEvent(t, controller.Events(), EventError)
+	if got, want := errEv.Text, "program failed at line 1: error:2"; got != want {
+		t.Fatalf("error text = %q, want %q", got, want)
+	}
+}
+
 func TestControllerProgramPauseResumeStopAndModalBlocking(t *testing.T) {
 	t.Parallel()
 
@@ -734,6 +830,24 @@ func TestControllerProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	if got, want := errEv.Text, "program response backlog full"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
+}
+
+func enableTestContour(t *testing.T, controller *Controller) []macro.Point {
+	t.Helper()
+	points := []macro.Point{
+		{X: 0, Y: 0, Z: 0},
+		{X: 1, Y: 0, Z: 0.1},
+		{X: 0, Y: 1, Z: 0.2},
+	}
+	for _, point := range points {
+		if err := controller.Contour().AddPoint(point); err != nil {
+			t.Fatalf("Contour().AddPoint(%+v) error = %v", point, err)
+		}
+	}
+	if err := controller.Contour().Enable(); err != nil {
+		t.Fatalf("Contour().Enable() error = %v", err)
+	}
+	return points
 }
 
 func writeProgramFile(t *testing.T, name string, contents string) string {
