@@ -22,6 +22,7 @@ const defaultStatusPollInterval = 500 * time.Millisecond
 type programRun struct {
 	program gcode.Program
 	rxCh    chan string
+	allRxCh chan string
 	cancel  context.CancelFunc
 }
 
@@ -347,6 +348,7 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 	run := &programRun{
 		program: c.loaded,
 		rxCh:    make(chan string, 64),
+		allRxCh: make(chan string, 256),
 		cancel:  cancel,
 	}
 	c.run = run
@@ -492,7 +494,21 @@ func (c *Controller) SendLineAndWaitOK(ctx context.Context, line string) error {
 	return c.sendLineAndWaitOK(ctx, run, line, 0)
 }
 
+func (c *Controller) SendLineCollectingResponses(ctx context.Context, line string) ([]string, error) {
+	c.mu.RLock()
+	run := c.run
+	c.mu.RUnlock()
+	if run == nil {
+		return nil, errors.New("no active program run")
+	}
+	return c.sendLineCollectingResponses(ctx, run, line)
+}
+
 func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, line string, sourceLine int) error {
+	// Keep the all-RX query buffer from accumulating stale responses while the
+	// normal program path is synchronously waiting on terminal responses only.
+	drainAllProgramResponses(run)
+	drainProgramTerminalResponses(run)
 	msg := transport.NewLineMessage(line)
 	if err := c.transport.Write(ctx, msg); err != nil {
 		if sourceLine > 0 {
@@ -505,6 +521,7 @@ func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, lin
 		case <-ctx.Done():
 			return ctx.Err()
 		case rx := <-run.rxCh:
+			drainAllProgramResponses(run)
 			status := classifyProgramResponse(rx)
 			switch status {
 			case responseIgnore:
@@ -517,6 +534,79 @@ func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, lin
 				}
 				return fmt.Errorf("macro command failed: %s", strings.TrimSpace(rx))
 			}
+		}
+	}
+}
+
+func (c *Controller) sendLineCollectingResponses(ctx context.Context, run *programRun, line string) ([]string, error) {
+	// Runtime query calls are intended for synchronous macro-handler execution
+	// during an active program run. runProgram is blocked while the handler runs,
+	// so no normal sendLineAndWaitOK call should consume this command's terminal
+	// response at the same time.
+	drainAllProgramResponses(run)
+	drainProgramTerminalResponses(run)
+	msg := transport.NewLineMessage(line)
+	if err := c.transport.Write(ctx, msg); err != nil {
+		return nil, fmt.Errorf("send query line: %w", err)
+	}
+	var responses []string
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case rx := <-run.allRxCh:
+			switch classifyProgramResponse(rx) {
+			case responseOK:
+				if err := consumeMirroredProgramResponse(ctx, run); err != nil {
+					return nil, err
+				}
+				return responses, nil
+			case responseFail:
+				if err := consumeMirroredProgramResponse(ctx, run); err != nil {
+					return nil, err
+				}
+				return nil, fmt.Errorf("query command failed: %s", strings.TrimSpace(rx))
+			case responseIgnore:
+				responses = append(responses, rx)
+			}
+		}
+	}
+}
+
+func drainProgramTerminalResponses(run *programRun) {
+	if run == nil || run.rxCh == nil {
+		return
+	}
+	for {
+		select {
+		case <-run.rxCh:
+		default:
+			return
+		}
+	}
+}
+
+func consumeMirroredProgramResponse(ctx context.Context, run *programRun) error {
+	if run == nil || run.rxCh == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-run.rxCh:
+		return nil
+	}
+}
+
+func drainAllProgramResponses(run *programRun) {
+	if run == nil || run.allRxCh == nil {
+		return
+	}
+	for {
+		select {
+		case <-run.allRxCh:
+		default:
+			return
 		}
 	}
 }
@@ -586,7 +676,11 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 }
 
 func (c *Controller) ReadWCSOffsets(ctx context.Context) (macro.WCSOffsets, error) {
-	return nil, errors.New("read WCS offsets is not available yet")
+	lines, err := c.SendLineCollectingResponses(ctx, "$#")
+	if err != nil {
+		return nil, err
+	}
+	return macro.ParseWCSOffsetsResponse(lines)
 }
 
 func (c *Controller) WriteWCSOffset(ctx context.Context, wcs macro.WCS, axis macro.Axis, value float64) error {
@@ -686,7 +780,17 @@ func (c *Controller) runTransportEventBridge() {
 
 func (c *Controller) deliverProgramResponseLocked(line string) *programRun {
 	run := c.run
-	if run == nil || !isProgramResponse(line) {
+	if run == nil {
+		return nil
+	}
+	if run.allRxCh != nil {
+		select {
+		case run.allRxCh <- line:
+		default:
+			return run
+		}
+	}
+	if !isProgramResponse(line) {
 		return nil
 	}
 	select {

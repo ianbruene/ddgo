@@ -20,6 +20,10 @@ func (f *fakeRuntime) SendLineAndWaitOK(_ context.Context, line string) error {
 	f.sent = append(f.sent, line)
 	return nil
 }
+func (f *fakeRuntime) SendLineCollectingResponses(_ context.Context, line string) ([]string, error) {
+	f.sent = append(f.sent, line)
+	return nil, nil
+}
 func (f *fakeRuntime) ReadWCSOffsets(context.Context) (WCSOffsets, error)       { return nil, nil }
 func (f *fakeRuntime) WriteWCSOffset(context.Context, WCS, Axis, float64) error { return nil }
 func (f *fakeRuntime) CurrentMachinePosition() (Point, bool)                    { return Point{}, false }
