@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -832,6 +833,31 @@ func TestControllerProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	}
 }
 
+func TestControllerAllRXBacklogOverflowFailsProgram(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
+	run := &programRun{rxCh: make(chan string, 1), allRxCh: make(chan string, 1)}
+	controller.mu.Lock()
+	controller.run = run
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+	run.allRxCh <- "[G54:1.000,2.000,3.000]"
+
+	controller.mu.Lock()
+	overflowRun := controller.deliverProgramResponseLocked("[G55:4.000,5.000,6.000]")
+	controller.mu.Unlock()
+	if overflowRun != run {
+		t.Fatalf("deliverProgramResponseLocked() overflow run mismatch")
+	}
+
+	controller.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if got, want := state.LastError, "program response backlog full"; got != want {
+		t.Fatalf("LastError = %q, want %q", got, want)
+	}
+}
+
 func enableTestContour(t *testing.T, controller *Controller) []macro.Point {
 	t.Helper()
 	points := []macro.Point{
@@ -1056,6 +1082,186 @@ func TestControllerMacroHandlerCanSendControllerLines(t *testing.T) {
 	if got, want := fake.Written()[1].Display, "G0 Y2"; got != want {
 		t.Fatalf("second write = %q, want %q", got, want)
 	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "macro-query.gcode", "M90\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	reg := macro.NewRegistry()
+	received := make(chan []string, 1)
+	reg.Register(90, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
+		lines, err := runtime.SendLineCollectingResponses(ctx, "$#")
+		if err != nil {
+			return err
+		}
+		received <- lines
+		return nil
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-query.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("query write = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("[G54:1.000,2.000,3.000]")
+	fake.InjectRX("[G55:4.000,5.000,6.000]")
+	fake.InjectRX("ok")
+
+	var lines []string
+	select {
+	case lines = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for collected query lines")
+	}
+	want := []string{"[G54:1.000,2.000,3.000]", "[G55:4.000,5.000,6.000]"}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("collected lines = %#v, want %#v", lines, want)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "macro-query-error.gcode", "M91\nG0 X9\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	reg := macro.NewRegistry()
+	reg.Register(91, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
+		_, err := runtime.SendLineCollectingResponses(ctx, "$#")
+		return err
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-query-error.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("query write = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("[G54:1.000,2.000,3.000]")
+	fake.InjectRX("error:2")
+
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M91 failed at line 1") {
+		t.Fatalf("LastError = %q, want macro context", state.LastError)
+	}
+	if !strings.Contains(state.LastError, "query command failed: error:2") {
+		t.Fatalf("LastError = %q, want query failure text", state.LastError)
+	}
+	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
+}
+
+func TestControllerReadWCSOffsetsUsesQueryHelper(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "macro-read-wcs.gcode", "M92\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	reg := macro.NewRegistry()
+	received := make(chan macro.WCSOffsets, 1)
+	reg.Register(92, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
+		offsets, err := runtime.ReadWCSOffsets(ctx)
+		if err != nil {
+			return err
+		}
+		received <- offsets
+		return nil
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-read-wcs.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("query write = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("[G54:1.000,2.000,3.000]")
+	fake.InjectRX("[G55:4.000,5.000,6.000]")
+	fake.InjectRX("ok")
+
+	var offsets macro.WCSOffsets
+	select {
+	case offsets = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for parsed offsets")
+	}
+	if got, want := offsets[macro.WCS("G54")], (macro.Point{X: 1, Y: 2, Z: 3}); got != want {
+		t.Fatalf("G54 offsets = %+v, want %+v", got, want)
+	}
+	if got, want := offsets[macro.WCS("G55")], (macro.Point{X: 4, Y: 5, Z: 6}); got != want {
+		t.Fatalf("G55 offsets = %+v, want %+v", got, want)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerNormalProgramSendIgnoresIntermediateRX(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "normal-intermediate.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program normal-intermediate.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+		t.Fatalf("written line = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	fake.InjectRX("[GC:G0 G54 G17]")
+	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
+	if got := controller.Snapshot().ProgramStatus; got != ProgramRunning {
+		t.Fatalf("ProgramStatus after intermediate RX = %q, want %q", got, ProgramRunning)
+	}
+
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
 }

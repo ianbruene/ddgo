@@ -40,6 +40,7 @@ type Invocation struct {
 
 type Runtime interface {
 	SendLineAndWaitOK(ctx context.Context, line string) error
+	SendLineCollectingResponses(ctx context.Context, line string) ([]string, error)
 
 	ReadWCSOffsets(ctx context.Context) (WCSOffsets, error)
 	WriteWCSOffset(ctx context.Context, wcs WCS, axis Axis, value float64) error
