@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -833,16 +834,16 @@ func TestControllerProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	}
 }
 
-func TestControllerAllRXBacklogOverflowFailsProgram(t *testing.T) {
+func TestControllerQueryResponseBacklogOverflowFailsProgram(t *testing.T) {
 	t.Parallel()
 
 	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
-	run := &programRun{rxCh: make(chan string, 1), allRxCh: make(chan string, 1)}
+	run := &programRun{rxCh: make(chan string, 1), queryRxCh: make(chan string, 1)}
 	controller.mu.Lock()
 	controller.run = run
 	controller.state.ProgramStatus = ProgramRunning
 	controller.mu.Unlock()
-	run.allRxCh <- "[G54:1.000,2.000,3.000]"
+	run.queryRxCh <- "[G54:1.000,2.000,3.000]"
 
 	controller.mu.Lock()
 	overflowRun := controller.deliverProgramResponseLocked("[G55:4.000,5.000,6.000]")
@@ -1264,6 +1265,100 @@ func TestControllerNormalProgramSendIgnoresIntermediateRX(t *testing.T) {
 
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerNormalLongRunningLineIgnoresNonTerminalRXBurst(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "normal-rx-burst.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program normal-rx-burst.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+		t.Fatalf("written line = %q, want %q", got, want)
+	}
+
+	for i := 0; i < 300; i++ {
+		fake.InjectRX(fmt.Sprintf("<Run|MPos:%d,0,0>", i))
+	}
+	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
+	if got := controller.Snapshot().ProgramStatus; got != ProgramRunning {
+		t.Fatalf("ProgramStatus after RX burst = %q, want %q", got, ProgramRunning)
+	}
+
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerSendLineCollectingResponsesRejectsConcurrentQuery(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
+	run := &programRun{
+		rxCh:      make(chan string, 1),
+		queryRxCh: make(chan string, 1),
+	}
+
+	controller.mu.Lock()
+	controller.run = run
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+
+	_, err := controller.sendLineCollectingResponses(context.Background(), run, "$#")
+	if !errors.Is(err, ErrProgramQueryActive) {
+		t.Fatalf("err = %v, want %v", err, ErrProgramQueryActive)
+	}
+}
+
+func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	run := &programRun{rxCh: make(chan string, 1)}
+	controller.mu.Lock()
+	controller.run = run
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := controller.sendLineCollectingResponses(context.Background(), run, "$#")
+		errCh <- err
+	}()
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("error:2")
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "query command failed: error:2") {
+			t.Fatalf("err = %v, want query failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for query failure")
+	}
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if run.queryRxCh != nil {
+		t.Fatalf("run.queryRxCh = %v, want nil", run.queryRxCh)
+	}
 }
 
 func TestControllerMotionRewrite(t *testing.T) {

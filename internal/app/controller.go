@@ -16,14 +16,15 @@ import (
 )
 
 var ErrProgramActive = errors.New("program is running; manual controls are disabled")
+var ErrProgramQueryActive = errors.New("program query is already active")
 
 const defaultStatusPollInterval = 500 * time.Millisecond
 
 type programRun struct {
-	program gcode.Program
-	rxCh    chan string
-	allRxCh chan string
-	cancel  context.CancelFunc
+	program   gcode.Program
+	rxCh      chan string
+	queryRxCh chan string
+	cancel    context.CancelFunc
 }
 
 type Controller struct {
@@ -348,7 +349,6 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 	run := &programRun{
 		program: c.loaded,
 		rxCh:    make(chan string, 64),
-		allRxCh: make(chan string, 256),
 		cancel:  cancel,
 	}
 	c.run = run
@@ -505,10 +505,6 @@ func (c *Controller) SendLineCollectingResponses(ctx context.Context, line strin
 }
 
 func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, line string, sourceLine int) error {
-	// Keep the all-RX query buffer from accumulating stale responses while the
-	// normal program path is synchronously waiting on terminal responses only.
-	drainAllProgramResponses(run)
-	drainProgramTerminalResponses(run)
 	msg := transport.NewLineMessage(line)
 	if err := c.transport.Write(ctx, msg); err != nil {
 		if sourceLine > 0 {
@@ -521,7 +517,6 @@ func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, lin
 		case <-ctx.Done():
 			return ctx.Err()
 		case rx := <-run.rxCh:
-			drainAllProgramResponses(run)
 			status := classifyProgramResponse(rx)
 			switch status {
 			case responseIgnore:
@@ -539,12 +534,27 @@ func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, lin
 }
 
 func (c *Controller) sendLineCollectingResponses(ctx context.Context, run *programRun, line string) ([]string, error) {
-	// Runtime query calls are intended for synchronous macro-handler execution
-	// during an active program run. runProgram is blocked while the handler runs,
-	// so no normal sendLineAndWaitOK call should consume this command's terminal
-	// response at the same time.
-	drainAllProgramResponses(run)
-	drainProgramTerminalResponses(run)
+	c.mu.Lock()
+	if c.run != run {
+		c.mu.Unlock()
+		return nil, context.Canceled
+	}
+	if run.queryRxCh != nil {
+		c.mu.Unlock()
+		return nil, ErrProgramQueryActive
+	}
+	queryCh := make(chan string, 256)
+	run.queryRxCh = queryCh
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		if c.run == run && run.queryRxCh == queryCh {
+			run.queryRxCh = nil
+		}
+		c.mu.Unlock()
+	}()
+
 	msg := transport.NewLineMessage(line)
 	if err := c.transport.Write(ctx, msg); err != nil {
 		return nil, fmt.Errorf("send query line: %w", err)
@@ -554,59 +564,15 @@ func (c *Controller) sendLineCollectingResponses(ctx context.Context, run *progr
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case rx := <-run.allRxCh:
+		case rx := <-queryCh:
 			switch classifyProgramResponse(rx) {
 			case responseOK:
-				if err := consumeMirroredProgramResponse(ctx, run); err != nil {
-					return nil, err
-				}
 				return responses, nil
 			case responseFail:
-				if err := consumeMirroredProgramResponse(ctx, run); err != nil {
-					return nil, err
-				}
 				return nil, fmt.Errorf("query command failed: %s", strings.TrimSpace(rx))
 			case responseIgnore:
 				responses = append(responses, rx)
 			}
-		}
-	}
-}
-
-func drainProgramTerminalResponses(run *programRun) {
-	if run == nil || run.rxCh == nil {
-		return
-	}
-	for {
-		select {
-		case <-run.rxCh:
-		default:
-			return
-		}
-	}
-}
-
-func consumeMirroredProgramResponse(ctx context.Context, run *programRun) error {
-	if run == nil || run.rxCh == nil {
-		return nil
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-run.rxCh:
-		return nil
-	}
-}
-
-func drainAllProgramResponses(run *programRun) {
-	if run == nil || run.allRxCh == nil {
-		return
-	}
-	for {
-		select {
-		case <-run.allRxCh:
-		default:
-			return
 		}
 	}
 }
@@ -783,9 +749,10 @@ func (c *Controller) deliverProgramResponseLocked(line string) *programRun {
 	if run == nil {
 		return nil
 	}
-	if run.allRxCh != nil {
+	if run.queryRxCh != nil {
 		select {
-		case run.allRxCh <- line:
+		case run.queryRxCh <- line:
+			return nil
 		default:
 			return run
 		}
