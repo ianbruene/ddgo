@@ -1,47 +1,56 @@
-# DDGo foundation
+# DDGo
 
-This is a starter Go module for a small CNC / GRBL-style desktop UI.
+DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is organized around a testable core controller, with optional real serial and Qt UI layers enabled through build tags.
 
-It is intentionally split into a thin UI layer and a testable core:
+## Current capabilities
 
-- `internal/app`: controller and app event model
-- `internal/grbl`: GRBL command building and basic status parsing
-- `internal/transport`: serial transport interface, fake transport, and real serial transport behind a build tag
-- `internal/ports`: serial port discovery helpers behind a build tag
-- `internal/ui`: MIQT / Qt Widgets UI behind a build tag
-- `cmd/ddgo`: application entrypoint
+- Serial transport abstraction with a fake transport for controller and package tests.
+- Optional real USB/TTY serial transport behind the `serial` build tag.
+- Optional MIQT/Qt Widgets UI behind the `miqt` build tag.
+- Port discovery seam through `ports.ListFunc`, with real port listing behind the `serial` build tag.
+- Console send path for manual controller commands.
+- Jog and machine action commands, including jog cancel, unlock, home, hold, resume, status, and soft reset helpers.
+- Status polling and status parsing for machine state, machine position, work position, feed, and spindle values.
+- G-code file loading through `internal/gcode`.
+- Program execution with pause, resume, stop, progress tracking, and terminal-response handling.
+- Macro interception framework for registered application-level macro handlers.
+- Macro runtime query support for collecting query responses during an active program run.
+- WCS offset read/write helper support using `$#` and `G10 L2`.
+- Process-local variable store and contour state primitives.
+- Contour mode lifecycle reset on program start and program failure.
 
-## Layout
+## What is not implemented yet
 
-The UI follows the requested layout:
+- Built-in production macro handlers are not installed yet.
+- Probe execution through the macro runtime is not implemented yet.
+- Probe result capture is not implemented yet.
+- Contour motion rewriting / Z compensation is not implemented yet.
+- Machine profile/configuration is still future work.
+- Persistent user settings are still future work.
 
-- **Left pane**: console with command line + send button underneath
-- **Right pane**: connection controls, jog controls, machine action buttons, status labels
+## Repository layout
 
-The connection pane now contains just:
+- `internal/app`: controller orchestration, state, events, connection control, program runs, and runtime hooks.
+- `internal/gcode`: G-code file loading and runnable-line parsing with raw and sanitized text.
+- `internal/grbl`: GRBL command construction and status parsing helpers.
+- `internal/macro`: macro interception framework, runtime interfaces, WCS helpers, variables, and contour state primitives.
+- `internal/transport`: serial transport interface, fake transport, and real/stub serial implementations.
+- `internal/ports`: serial port discovery seam and real/stub implementations.
+- `internal/ui`: optional MIQT/Qt Widgets UI and no-tag stub.
+- `cmd/ddgo`: application entrypoint.
+- `docs/architecture.md`: current architecture notes for contributors.
+- `docs/macros.md`: macro framework status, runtime capabilities, limitations, and planned order.
 
-- port selector
-- refresh ports button
-- connect / disconnect button
-
-This keeps connection controls focused only on selecting a USB port and connecting.
-
-## Simpler port discovery seam
-
-Port discovery no longer uses a one-method `SystemLister` type. The controller now accepts a plain function of type `ports.ListFunc`, and the real app wires it up with `ports.ListPorts`.
-
-That keeps the seam easy to test while avoiding unnecessary objects.
-
-## Why build tags are used
+## Build tags
 
 The real serial implementation and MIQT UI are behind build tags:
 
-- `serial` enables the real USB/TTY serial implementation and port discovery
-- `miqt` enables the Qt / MIQT UI
+- `serial` enables the real USB/TTY serial implementation and port discovery.
+- `miqt` enables the Qt / MIQT UI.
 
 This keeps the core logic testable on machines that do not have Qt installed.
 
-## Run tests
+## Testing
 
 Core and stub-path tests work without Qt installed:
 
@@ -55,15 +64,13 @@ If you want to include the serial-tagged transport and port-listing tests on a m
 go test -tags serial ./internal/transport ./internal/ports ./internal/app ./internal/grbl
 ```
 
-## Build the real app
+## Build/run
 
-On a machine with Qt 5 development packages installed:
+On a machine with Qt 5 development packages installed, build the real app with:
 
 ```bash
 go build -tags 'miqt serial' ./cmd/ddgo
 ```
-
-## Linux Qt prerequisites
 
 A minimal Debian/Ubuntu setup for MIQT Qt 5 is typically:
 
@@ -71,19 +78,19 @@ A minimal Debian/Ubuntu setup for MIQT Qt 5 is typically:
 sudo apt install qtbase5-dev build-essential golang-go pkg-config
 ```
 
-## Notes
+Notes:
 
 - The serial transport uses `go.bug.st/serial`.
 - The UI is written directly against `github.com/mappu/miqt/qt`.
 - The no-tag build prints an error telling you to rebuild with tags.
-- The current implementation sends conservative baseline GRBL commands for jog, unlock, home, hold, resume, status, and soft reset.
-- This is a foundation, not a complete production operator console yet.
 
-## Suggested next additions
+## Development status
 
-- configurable machine profile for GRBL-variant differences
-- richer status parsing (`MPos`, `WPos`, alarms, feed/spindle overrides)
-- per-button enable/disable rules by machine state
-- reconnect flow and explicit serial read timeouts
-- log export and persistent user settings
-- integration tests against your MockGRBL implementation
+Current roadmap:
+
+- Implement first non-probe macro handlers.
+- Implement probe command execution and probe result parsing.
+- Implement contour surface fitting and motion rewriting.
+- Add configurable machine profile support.
+- Improve UI affordances for program and macro state.
+- Add persistence/settings as needed.
