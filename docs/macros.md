@@ -15,6 +15,38 @@ Raw arguments are available for future commands where parentheses, semicolons, c
 
 ## Implemented macro handlers
 
+### `M100` — write midpoint between two WCS axes
+
+Syntax:
+
+```gcode
+M100 <source-WCS-axis-a> <source-WCS-axis-b> <destination-WCS-axis>
+```
+
+`M100` reads controller WCS offsets through `$#`, resolves the two source WCS-axis values from the same offset snapshot, computes their midpoint, and writes the midpoint to the destination WCS axis through the runtime WCS writer. After the write succeeds, `M100` reads WCS offsets again and verifies that the destination axis matches the intended midpoint within `0.000001`.
+
+Example:
+
+```gcode
+M100 G54X G55X G56X
+```
+
+### `M101` — compare two WCS axes
+
+Syntax:
+
+```gcode
+M101 <WCS-axis-a> <WCS-axis-b> <tolerance>
+```
+
+`M101` reads controller WCS offsets through `$#`, resolves both WCS-axis values from the same offset snapshot, and compares the absolute difference with the finite non-negative tolerance. The handler succeeds silently when the values are equal, within tolerance, or exactly at tolerance. If the values differ by more than the tolerance, the handler fails the program.
+
+Example:
+
+```gcode
+M101 G54X G55X 0.001
+```
+
 ### `M107` — store a variable
 
 Syntax:
@@ -59,7 +91,7 @@ Registered handlers can use the current runtime to:
 
 ## Current limitations
 
-- Only `M107` and `M108` are registered by the default macro engine.
+- Only `M100`, `M101`, `M107`, and `M108` are registered by the default macro engine.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
 - The probe runtime method currently returns not-available.

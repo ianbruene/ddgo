@@ -11,13 +11,16 @@ import (
 )
 
 type fakeRuntime struct {
-	vars    *VariableStore
-	noVars  bool
-	contour *ContourState
-	sent    []string
-	offsets WCSOffsets
-	readWCS int
-	writes  []wcsWrite
+	vars        *VariableStore
+	noVars      bool
+	contour     *ContourState
+	sent        []string
+	offsets     WCSOffsets
+	offsetReads []WCSOffsets
+	readErrs    []error
+	writeErr    error
+	readWCS     int
+	writes      []wcsWrite
 }
 
 type wcsWrite struct {
@@ -36,11 +39,23 @@ func (f *fakeRuntime) SendLineCollectingResponses(_ context.Context, line string
 }
 func (f *fakeRuntime) ReadWCSOffsets(context.Context) (WCSOffsets, error) {
 	f.readWCS++
+	if len(f.readErrs) > 0 {
+		err := f.readErrs[0]
+		f.readErrs = f.readErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(f.offsetReads) > 0 {
+		offsets := f.offsetReads[0]
+		f.offsetReads = f.offsetReads[1:]
+		return offsets, nil
+	}
 	return f.offsets, nil
 }
 func (f *fakeRuntime) WriteWCSOffset(_ context.Context, wcs WCS, axis Axis, value float64) error {
 	f.writes = append(f.writes, wcsWrite{wcs: wcs, axis: axis, value: value})
-	return nil
+	return f.writeErr
 }
 func (f *fakeRuntime) CurrentMachinePosition() (Point, bool)           { return Point{}, false }
 func (f *fakeRuntime) CurrentWorkPosition() (Point, bool)              { return Point{}, false }
