@@ -984,7 +984,7 @@ func TestControllerDefaultMacrosStoreNumericAndWriteWCS(t *testing.T) {
 func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
 	t.Parallel()
 
-	path := writeProgramFile(t, "default-macros-wcs.gcode", "M107 depth G54Z\nM108 depth G55X\n")
+	path := writeProgramFile(t, "default-macros-wcs.gcode", "M107 depth G54Z\nM108 depth G55Z\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
 	if err := controller.LoadProgramFile(path); err != nil {
@@ -1003,11 +1003,11 @@ func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
 	if got, want := fake.Written()[0].Display, "$#"; got != want {
 		t.Fatalf("first written line = %q, want %q", got, want)
 	}
-	fake.InjectRX("[G54:1.000,2.000,-3.250]")
+	fake.InjectRX("[G54:1.000,2.000,-3.500]")
 	fake.InjectRX("[G55:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G10 L2 P2 X-3.250000"; got != want {
+	if got, want := fake.Written()[1].Display, "G10 L2 P2 Z-3.500000"; got != want {
 		t.Fatalf("second written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -1476,5 +1476,82 @@ func TestControllerMotionRewriteErrorFailsProgram(t *testing.T) {
 	}
 	if got := len(fake.Written()); got != 0 {
 		t.Fatalf("len(written) = %d, want 0", got)
+	}
+}
+
+func TestControllerDefaultM108FailurePreventsLaterGCode(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "default-macro-missing-var.gcode", "M108 missing G54Z\nG0 X9\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-macro-missing-var.gcode")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M108 failed at line 1") || !strings.Contains(state.LastError, "unknown variable") {
+		t.Fatalf("LastError = %q, want macro context and unknown variable", state.LastError)
+	}
+	if got := len(fake.Written()); got != 0 {
+		t.Fatalf("len(written) = %d, want 0; writes=%#v", got, fake.Written())
+	}
+}
+
+func TestControllerPrefixLikeDefaultMacroPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "prefix-like-macro.gcode", "M107.1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program prefix-like-macro.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "M107.1"; got != want {
+		t.Fatalf("written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerFinishProgramFailureCancelsActiveRun(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	run := &programRun{rxCh: make(chan string, 1), cancel: cancel}
+	controller.mu.Lock()
+	controller.run = run
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+
+	controller.finishProgramFailure(run, errors.New("forced failure"))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("run context was not canceled")
+	}
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if got, want := state.LastError, "forced failure"; got != want {
+		t.Fatalf("LastError = %q, want %q", got, want)
 	}
 }

@@ -59,7 +59,7 @@ type MotionRewriter interface {
 	RewriteMotion(ctx context.Context, runtime Runtime, line gcode.Line) (string, bool, error)
 }
 
-var leadingMCodeRE = regexp.MustCompile(`^[mM]([0-9]+)(.*)$`)
+var leadingMCodeRE = regexp.MustCompile(`^[mM]([0-9]+)(?:\s+(.*)|\s*)$`)
 
 func ParseInvocation(line gcode.Line) (Invocation, bool) {
 	clean := strings.TrimSpace(line.Text)
@@ -80,7 +80,9 @@ func ParseInvocation(line gcode.Line) (Invocation, bool) {
 	}
 	rawArgs := ""
 	if rawMatch := leadingMCodeRE.FindStringSubmatch(raw); rawMatch != nil {
-		rawArgs = strings.TrimSpace(rawMatch[2])
+		if len(rawMatch) > 2 {
+			rawArgs = strings.TrimSpace(rawMatch[2])
+		}
 	}
 	return Invocation{Line: line, Code: code, RawArgs: rawArgs, CleanArgs: strings.TrimSpace(cleanMatch[2])}, true
 }

@@ -12,6 +12,7 @@ import (
 
 type fakeRuntime struct {
 	vars    *VariableStore
+	noVars  bool
 	contour *ContourState
 	sent    []string
 	offsets WCSOffsets
@@ -46,6 +47,9 @@ func (f *fakeRuntime) CurrentWorkPosition() (Point, bool)              { return 
 func (f *fakeRuntime) LastProbePoint() (Point, bool)                   { return Point{}, false }
 func (f *fakeRuntime) RunProbe(context.Context, string) (Point, error) { return Point{}, nil }
 func (f *fakeRuntime) Variables() *VariableStore {
+	if f.noVars {
+		return nil
+	}
 	if f.vars == nil {
 		f.vars = NewVariableStore()
 	}
@@ -67,7 +71,13 @@ func TestParseInvocation(t *testing.T) {
 		{"args", gcode.Line{Raw: "M5 S0 ; off", Text: "M5 S0"}, 5, "S0 ; off", "S0", true},
 		{"generic", gcode.Line{Raw: "M999 X1 Y2", Text: "M999 X1 Y2"}, 999, "X1 Y2", "X1 Y2", true},
 		{"lowercase", gcode.Line{Raw: "m42 P1", Text: "m42 P1"}, 42, "P1", "P1", true},
-		{"compact", gcode.Line{Raw: "M999X1Y2", Text: "M999X1Y2"}, 999, "X1Y2", "X1Y2", true},
+		{"compact", gcode.Line{Raw: "M999X1Y2", Text: "M999X1Y2"}, 0, "", "", false},
+		{"m107 args", gcode.Line{Raw: "M107 depth 1", Text: "M107 depth 1"}, 107, "depth 1", "depth 1", true},
+		{"m107 bare", gcode.Line{Raw: "M107", Text: "M107"}, 107, "", "", true},
+		{"m107 dotted", gcode.Line{Raw: "M107.1", Text: "M107.1"}, 0, "", "", false},
+		{"m107 prefix", gcode.Line{Raw: "M107depth 1", Text: "M107depth 1"}, 0, "", "", false},
+		{"m108 prefix", gcode.Line{Raw: "M108depth G54Z", Text: "M108depth G54Z"}, 0, "", "", false},
+		{"m107 lowercase", gcode.Line{Raw: "m107 depth 1", Text: "m107 depth 1"}, 107, "depth 1", "depth 1", true},
 		{"embedded", gcode.Line{Raw: "G1 X1 M7", Text: "G1 X1 M7"}, 0, "", "", false},
 		{"malformed", gcode.Line{Raw: "M X1", Text: "M X1"}, 0, "", "", false},
 	}
