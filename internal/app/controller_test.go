@@ -1432,6 +1432,7 @@ func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *tes
 
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
@@ -1448,6 +1449,9 @@ func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *tes
 		errCh <- err
 	}()
 	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("query write = %q, want %q", got, want)
+	}
 	fake.InjectRX("error:2")
 
 	select {
@@ -1603,6 +1607,25 @@ func TestControllerFinishProgramFailureCancelsActiveRun(t *testing.T) {
 	if got, want := errEv.Text, "forced failure"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
+}
+
+func TestControllerFinishProgramFailureIgnoresNilRun(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
+	before := controller.Snapshot()
+
+	controller.finishProgramFailure(nil, errors.New("nil run failure"))
+
+	after := controller.Snapshot()
+	if got, want := after.ProgramStatus, before.ProgramStatus; got != want {
+		t.Fatalf("ProgramStatus = %q, want %q", got, want)
+	}
+	if after.LastError == "nil run failure" {
+		t.Fatalf("LastError = %q, want unchanged", after.LastError)
+	}
+
+	ensureNoEvent(t, controller.Events(), 100*time.Millisecond)
 }
 
 func TestControllerFinishProgramFailureIgnoresStaleRun(t *testing.T) {
