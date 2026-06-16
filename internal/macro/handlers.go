@@ -46,7 +46,11 @@ func handleM107(ctx context.Context, runtime Runtime, inv Invocation) error {
 			return err
 		}
 	}
-	runtime.Variables().Set(name, value)
+	vars := runtime.Variables()
+	if vars == nil {
+		return fmt.Errorf("variable store is not available")
+	}
+	vars.Set(name, value)
 	return nil
 }
 
@@ -65,7 +69,11 @@ func handleM108(ctx context.Context, runtime Runtime, inv Invocation) error {
 	if err != nil {
 		return err
 	}
-	value, ok := runtime.Variables().Get(name)
+	vars := runtime.Variables()
+	if vars == nil {
+		return fmt.Errorf("variable store is not available")
+	}
+	value, ok := vars.Get(name)
 	if !ok {
 		return fmt.Errorf("unknown variable %q", name)
 	}

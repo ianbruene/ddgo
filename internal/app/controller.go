@@ -629,15 +629,22 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	if err == nil {
 		return
 	}
+	var cancel context.CancelFunc
 	c.mu.Lock()
 	if c.run == run {
 		c.run = nil
 		c.state.ProgramStatus = ProgramFailed
 		c.state.LastError = err.Error()
 		c.contour.Disable()
+		if run != nil {
+			cancel = run.cancel
+		}
 	}
 	state := c.state
 	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program failed"}
 	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
 }

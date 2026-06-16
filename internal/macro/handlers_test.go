@@ -101,3 +101,37 @@ func TestM108Errors(t *testing.T) {
 		}
 	}
 }
+
+func TestM107NumericDoesNotReadWCS(t *testing.T) {
+	rt := &fakeRuntime{}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M107 depth -1.25", Text: "M107 depth -1.25"})
+	if err != nil {
+		t.Fatalf("Dispatch error = %v", err)
+	}
+	if rt.readWCS != 0 {
+		t.Fatalf("readWCS = %d, want 0", rt.readWCS)
+	}
+}
+
+func TestM107WCSParseErrorPrecedence(t *testing.T) {
+	for _, line := range []string{"M107 depth G60 X", "M107 depth G54 A"} {
+		rt := &fakeRuntime{}
+		_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: line, Text: line})
+		if err == nil {
+			t.Fatalf("Dispatch(%q) error = nil", line)
+		}
+		if strings.Contains(err.Error(), "invalid numeric value") {
+			t.Fatalf("Dispatch(%q) error = %v, want WCS-specific error", line, err)
+		}
+	}
+}
+
+func TestDefaultHandlersMissingVariableStore(t *testing.T) {
+	for _, line := range []string{"M107 depth 1", "M108 depth G54 X"} {
+		rt := &fakeRuntime{noVars: true}
+		_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: line, Text: line})
+		if err == nil || !strings.Contains(err.Error(), "variable store is not available") {
+			t.Fatalf("Dispatch(%q) error = %v, want variable store error", line, err)
+		}
+	}
+}

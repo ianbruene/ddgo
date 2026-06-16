@@ -4,7 +4,7 @@ This document separates DDGo's macro framework support from command behavior tha
 
 ## Macro framework status
 
-DDGo has an application-level macro interception framework. During program execution, the macro engine can intercept leading M-code-style lines when a handler is registered for that leading code.
+DDGo has an application-level macro interception framework. During program execution, the macro engine can intercept leading M-code-style lines when a handler is registered for that leading code. Macro numbers must be followed by whitespace or the end of the line, so prefix-like controller forms such as `M107.1` and `M107depth 1` pass through as normal G-code.
 
 Handlers receive both `RawArgs` and `CleanArgs`:
 
