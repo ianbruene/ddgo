@@ -110,15 +110,17 @@ func consumeWCSAxisRef(fields []string) (WCSAxisRef, []string, error) {
 	if max > len(fields) {
 		max = len(fields)
 	}
-	var lastErr error
+	var bestErr error
 	for n := max; n >= 1; n-- {
 		ref, err := ParseWCSAxisRef(strings.Join(fields[:n], " "))
 		if err == nil {
 			return ref, fields[n:], nil
 		}
-		lastErr = err
+		if bestErr == nil || strings.Contains(err.Error(), "unsupported") {
+			bestErr = err
+		}
 	}
-	return WCSAxisRef{}, fields, lastErr
+	return WCSAxisRef{}, fields, bestErr
 }
 
 func withMissingWCSAxisMessage(err error, msg string) error {
