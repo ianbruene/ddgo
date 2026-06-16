@@ -13,7 +13,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 - Status polling and status parsing for machine state, machine position, work position, feed, and spindle values.
 - G-code file loading through `internal/gcode`.
 - Program execution with pause, resume, stop, progress tracking, and terminal-response handling.
-- Macro interception framework for registered application-level macro handlers.
+- Macro interception framework for registered application-level macro handlers, with default built-in handlers for M100 midpoint write/verify, M101 WCS comparison, M107 variable store, and M108 variable writeback.
 - Macro runtime query support for collecting query responses during an active program run.
 - WCS offset read/write helper support using `$#` and `G10 L2`.
 - Process-local variable store and contour state primitives.
@@ -21,7 +21,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 
 ## What is not implemented yet
 
-- Built-in production macro handlers are not installed yet.
+- M102/M106 expression/assertion handlers are not implemented yet.
 - Probe execution through the macro runtime is not implemented yet.
 - Probe result capture is not implemented yet.
 - Contour motion rewriting / Z compensation is not implemented yet.
@@ -88,7 +88,7 @@ Notes:
 
 Current roadmap:
 
-- Implement first non-probe macro handlers.
+- Implement expression/assertion macro handlers.
 - Implement probe command execution and probe result parsing.
 - Implement contour surface fitting and motion rewriting.
 - Add configurable machine profile support.
