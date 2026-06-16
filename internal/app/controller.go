@@ -631,14 +631,16 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	}
 	var cancel context.CancelFunc
 	c.mu.Lock()
-	if c.run == run {
-		c.run = nil
-		c.state.ProgramStatus = ProgramFailed
-		c.state.LastError = err.Error()
-		c.contour.Disable()
-		if run != nil {
-			cancel = run.cancel
-		}
+	if c.run != run {
+		c.mu.Unlock()
+		return
+	}
+	c.run = nil
+	c.state.ProgramStatus = ProgramFailed
+	c.state.LastError = err.Error()
+	c.contour.Disable()
+	if run != nil {
+		cancel = run.cancel
 	}
 	state := c.state
 	c.mu.Unlock()

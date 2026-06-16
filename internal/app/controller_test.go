@@ -909,6 +909,18 @@ func ensureWritesStayAt(t *testing.T, fake *transport.FakeTransport, want int, d
 	}
 }
 
+func ensureNoEvent(t *testing.T, ch <-chan Event, dur time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(dur)
+	defer timer.Stop()
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("unexpected event: %+v", ev)
+	case <-timer.C:
+	}
+}
+
 func waitForState(t *testing.T, controller *Controller, fn func(State) bool) State {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -957,6 +969,7 @@ func TestControllerDefaultMacrosStoreNumericAndWriteWCS(t *testing.T) {
 	path := writeProgramFile(t, "default-macros-numeric.gcode", "M107 depth -1.25\nM108 depth G54Z\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -987,6 +1000,7 @@ func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
 	path := writeProgramFile(t, "default-macros-wcs.gcode", "M107 depth G54Z\nM108 depth G55Z\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -1512,6 +1526,7 @@ func TestControllerPrefixLikeDefaultMacroPassesThrough(t *testing.T) {
 	path := writeProgramFile(t, "prefix-like-macro.gcode", "M107.1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -1537,6 +1552,7 @@ func TestControllerFinishProgramFailureCancelsActiveRun(t *testing.T) {
 
 	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	run := &programRun{rxCh: make(chan string, 1), cancel: cancel}
 	controller.mu.Lock()
 	controller.run = run
@@ -1545,13 +1561,83 @@ func TestControllerFinishProgramFailureCancelsActiveRun(t *testing.T) {
 
 	controller.finishProgramFailure(run, errors.New("forced failure"))
 
-	select {
-	case <-ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("run context was not canceled")
+	if err := ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run context error = %v, want %v", err, context.Canceled)
 	}
 	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
 	if got, want := state.LastError, "forced failure"; got != want {
 		t.Fatalf("LastError = %q, want %q", got, want)
 	}
+}
+
+func TestControllerFinishProgramFailureIgnoresStaleRun(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	run1 := &programRun{rxCh: make(chan string, 1), cancel: cancel1}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	run2 := &programRun{rxCh: make(chan string, 1), cancel: cancel2}
+
+	controller.mu.Lock()
+	controller.run = run2
+	controller.state.ProgramStatus = ProgramRunning
+	controller.mu.Unlock()
+
+	controller.finishProgramFailure(run1, context.Canceled)
+
+	if err := ctx1.Err(); err != nil {
+		t.Fatalf("stale run context was canceled: %v", err)
+	}
+	if err := ctx2.Err(); err != nil {
+		t.Fatalf("active run context was canceled: %v", err)
+	}
+	if got := controller.Snapshot().ProgramStatus; got != ProgramRunning {
+		t.Fatalf("ProgramStatus = %q, want %q", got, ProgramRunning)
+	}
+
+	ensureNoEvent(t, controller.Events(), 100*time.Millisecond)
+}
+
+func TestControllerForcedFailureDoesNotEmitContextCanceledError(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "forced-failure.gcode", "G0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program forced-failure.gcode")
+	waitForWrites(t, fake, 1)
+
+	controller.mu.RLock()
+	run := controller.run
+	controller.mu.RUnlock()
+	if run == nil {
+		t.Fatal("controller.run = nil, want active run")
+	}
+
+	controller.finishProgramFailure(run, errors.New("forced failure"))
+
+	errEv := waitForEvent(t, controller.Events(), EventError)
+	if got, want := errEv.Text, "forced failure"; got != want {
+		t.Fatalf("first error event = %q, want %q", got, want)
+	}
+
+	ensureNoEvent(t, controller.Events(), 150*time.Millisecond)
 }
