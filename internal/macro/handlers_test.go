@@ -2,6 +2,7 @@ package macro
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -133,5 +134,134 @@ func TestDefaultHandlersMissingVariableStore(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "variable store is not available") {
 			t.Fatalf("Dispatch(%q) error = %v, want variable store error", line, err)
 		}
+	}
+}
+
+func TestM100WritesMidpointAndVerifies(t *testing.T) {
+	rt := &fakeRuntime{offsetReads: []WCSOffsets{
+		{"G54": {X: -2.5}, "G55": {Z: 1.5}},
+		{"G56": {Y: -0.5}},
+	}}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M100 G54X G55Z G56Y", Text: "M100 G54X G55Z G56Y"})
+	if err != nil {
+		t.Fatalf("Dispatch error = %v", err)
+	}
+	if rt.readWCS != 2 {
+		t.Fatalf("readWCS = %d, want 2", rt.readWCS)
+	}
+	if len(rt.writes) != 1 || rt.writes[0] != (wcsWrite{wcs: "G56", axis: AxisY, value: -0.5}) {
+		t.Fatalf("writes = %#v", rt.writes)
+	}
+	if len(rt.sent) != 0 {
+		t.Fatalf("sent = %#v", rt.sent)
+	}
+}
+
+func TestM100DecimalMidpointWithSpacedRefs(t *testing.T) {
+	rt := &fakeRuntime{offsetReads: []WCSOffsets{
+		{"G54": {X: 1.25}, "G55": {X: 2.75}},
+		{"G56": {Z: 2.0}},
+	}}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M100 WCS G54 X G55 X G56 Z", Text: "M100 WCS G54 X G55 X G56 Z"})
+	if err != nil {
+		t.Fatalf("Dispatch error = %v", err)
+	}
+	if got := rt.writes[0].value; got != 2.0 {
+		t.Fatalf("midpoint = %v, want 2", got)
+	}
+}
+
+func TestM100Errors(t *testing.T) {
+	tests := []struct{ line, want string }{
+		{"M100", "missing first source WCS axis"},
+		{"M100 G54X", "missing second source WCS axis"},
+		{"M100 G54X G55X", "missing destination WCS axis"},
+		{"M100 G60X G55X G56X", "unsupported WCS"},
+		{"M100 G54A G55X G56X", "unsupported WCS axis"},
+		{"M100 G54X G55X G56X extra", "unexpected arguments"},
+	}
+	for _, tt := range tests {
+		rt := &fakeRuntime{}
+		_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: tt.line, Text: tt.line})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("Dispatch(%q) error = %v, want %q", tt.line, err, tt.want)
+		}
+	}
+}
+
+func TestM100RuntimeErrors(t *testing.T) {
+	rt := &fakeRuntime{offsets: WCSOffsets{"G55": {X: 1}, "G56": {X: 0}}}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M100 G54X G55X G56X", Text: "M100 G54X G55X G56X"})
+	if err == nil || !strings.Contains(err.Error(), "missing WCS offset") {
+		t.Fatalf("missing offset err = %v", err)
+	}
+	rt = &fakeRuntime{offsetReads: []WCSOffsets{{"G54": {X: 1}, "G55": {X: 3}}}, writeErr: errors.New("write failed")}
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M100 G54X G55X G56X", Text: "M100 G54X G55X G56X"})
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("write err = %v", err)
+	}
+	rt = &fakeRuntime{offsetReads: []WCSOffsets{{"G54": {X: 1}, "G55": {X: 3}}, {"G56": {X: 2.1}}}}
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M100 G54X G55X G56X", Text: "M100 G54X G55X G56X"})
+	if err == nil || !strings.Contains(err.Error(), "M100 verification failed") {
+		t.Fatalf("verify err = %v", err)
+	}
+}
+
+func TestM101Comparisons(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b float64
+		tol  string
+		fail bool
+	}{
+		{"equal", 1, 1, "0", false},
+		{"within", 1, 1.001, "0.01", false},
+		{"exact", 1, 1.01, "0.01", false},
+		{"outside", 1, 1.01, "0.001", true},
+		{"negative", -2.5, -2.4, "0.2", false},
+		{"decimal", 0.125, 0.130, "0.004", true},
+	}
+	for _, tt := range tests {
+		rt := &fakeRuntime{offsets: WCSOffsets{"G54": {X: tt.a}, "G55": {X: tt.b}}}
+		_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M101 G54X G55X " + tt.tol, Text: "M101 G54X G55X " + tt.tol})
+		if tt.fail && (err == nil || !strings.Contains(err.Error(), "WCS comparison failed")) {
+			t.Fatalf("%s err = %v, want comparison failure", tt.name, err)
+		}
+		if !tt.fail && err != nil {
+			t.Fatalf("%s err = %v", tt.name, err)
+		}
+		if rt.readWCS != 1 {
+			t.Fatalf("%s readWCS = %d, want 1", tt.name, rt.readWCS)
+		}
+	}
+}
+
+func TestM101Errors(t *testing.T) {
+	tests := []struct{ line, want string }{
+		{"M101", "missing first WCS axis"},
+		{"M101 G54X", "missing second WCS axis"},
+		{"M101 G54X G55X", "missing tolerance"},
+		{"M101 G54X G55X abc", "invalid tolerance"},
+		{"M101 G54X G55X -0.001", "negative tolerance"},
+		{"M101 G60X G55X 0.1", "unsupported WCS"},
+		{"M101 G54A G55X 0.1", "unsupported WCS axis"},
+		{"M101 G54X G55X 0.1 extra", "unexpected arguments"},
+	}
+	for _, tt := range tests {
+		rt := &fakeRuntime{}
+		_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: tt.line, Text: tt.line})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("Dispatch(%q) error = %v, want %q", tt.line, err, tt.want)
+		}
+	}
+	rt := &fakeRuntime{offsets: WCSOffsets{"G55": {X: 1}}}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M101 G54X G55X 0.1", Text: "M101 G54X G55X 0.1"})
+	if err == nil || !strings.Contains(err.Error(), "missing WCS offset") {
+		t.Fatalf("missing offset err = %v", err)
+	}
+	rt = &fakeRuntime{readErrs: []error{errors.New("read failed")}}
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M101 G54X G55X 0.1", Text: "M101 G54X G55X 0.1"})
+	if err == nil || !strings.Contains(err.Error(), "read failed") {
+		t.Fatalf("read err = %v", err)
 	}
 }
