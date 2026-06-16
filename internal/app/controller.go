@@ -631,7 +631,7 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	}
 	var cancel context.CancelFunc
 	c.mu.Lock()
-	if c.run != run {
+	if run == nil || c.run != run {
 		c.mu.Unlock()
 		return
 	}
@@ -639,9 +639,7 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	c.state.ProgramStatus = ProgramFailed
 	c.state.LastError = err.Error()
 	c.contour.Disable()
-	if run != nil {
-		cancel = run.cancel
-	}
+	cancel = run.cancel
 	state := c.state
 	c.mu.Unlock()
 	if cancel != nil {
