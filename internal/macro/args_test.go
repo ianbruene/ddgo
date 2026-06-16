@@ -81,6 +81,19 @@ func TestParseM100Args(t *testing.T) {
 	if _, err := parseM100Args("G54X G55X G56X extra"); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Fatalf("extra args err = %v", err)
 	}
+	if _, err := parseM100Args("G54 A G55X G56X"); err == nil || !strings.Contains(err.Error(), "unsupported WCS axis") {
+		t.Fatalf("parseM100Args spaced unsupported axis error = %v, want unsupported WCS axis", err)
+	}
+
+	got, err = parseM100Args("G54 X G55X G56 Z")
+	if err != nil {
+		t.Fatalf("parseM100Args mixed spacing error = %v", err)
+	}
+	if got.SourceA != (WCSAxisRef{WCS: "G54", Axis: AxisX}) ||
+		got.SourceB != (WCSAxisRef{WCS: "G55", Axis: AxisX}) ||
+		got.Destination != (WCSAxisRef{WCS: "G56", Axis: AxisZ}) {
+		t.Fatalf("parseM100Args mixed spacing = %#v", got)
+	}
 }
 
 func TestParseM101Args(t *testing.T) {
@@ -96,5 +109,18 @@ func TestParseM101Args(t *testing.T) {
 	}
 	if _, err := parseM101Args("G54X G55X abc"); err == nil || !strings.Contains(err.Error(), "invalid tolerance") {
 		t.Fatalf("invalid tolerance err = %v", err)
+	}
+	if _, err := parseM101Args("G54 A G55X 0.1"); err == nil || !strings.Contains(err.Error(), "unsupported WCS axis") {
+		t.Fatalf("parseM101Args spaced unsupported axis error = %v, want unsupported WCS axis", err)
+	}
+
+	got, err = parseM101Args("G54 X G55X 0.001")
+	if err != nil {
+		t.Fatalf("parseM101Args mixed spacing error = %v", err)
+	}
+	if got.First != (WCSAxisRef{WCS: "G54", Axis: AxisX}) ||
+		got.Second != (WCSAxisRef{WCS: "G55", Axis: AxisX}) ||
+		got.Tolerance != 0.001 {
+		t.Fatalf("parseM101Args mixed spacing = %#v", got)
 	}
 }
