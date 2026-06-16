@@ -53,6 +53,7 @@ func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller 
 		events:             make(chan Event, 1024),
 		state:              State{ProgramStatus: ProgramNotLoaded},
 		statusPollInterval: defaultStatusPollInterval,
+		macroEngine:        macro.NewDefaultEngine(),
 		variables:          macro.NewVariableStore(),
 		contour:            macro.NewContourState(),
 	}

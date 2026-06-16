@@ -951,6 +951,69 @@ func (r testRewriter) RewriteMotion(ctx context.Context, runtime macro.Runtime, 
 	return r.line, true, nil
 }
 
+func TestControllerDefaultMacrosStoreNumericAndWriteWCS(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "default-macros-numeric.gcode", "M107 depth -1.25\nM108 depth G54Z\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-macros-numeric.gcode")
+	waitForWrites(t, fake, 1)
+	written := fake.Written()
+	if got, want := len(written), 1; got != want {
+		t.Fatalf("len(written) = %d, want %d", got, want)
+	}
+	if got, want := written[0].Display, "G10 L2 P1 Z-1.250000"; got != want {
+		t.Fatalf("written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "default-macros-wcs.gcode", "M107 depth G54Z\nM108 depth G55X\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-macros-wcs.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("first written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("[G54:1.000,2.000,-3.250]")
+	fake.InjectRX("[G55:0.000,0.000,0.000]")
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	if got, want := fake.Written()[1].Display, "G10 L2 P2 X-3.250000"; got != want {
+		t.Fatalf("second written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
+}
+
 func TestControllerUnregisteredMCodePassesThrough(t *testing.T) {
 	t.Parallel()
 

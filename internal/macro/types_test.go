@@ -14,6 +14,15 @@ type fakeRuntime struct {
 	vars    *VariableStore
 	contour *ContourState
 	sent    []string
+	offsets WCSOffsets
+	readWCS int
+	writes  []wcsWrite
+}
+
+type wcsWrite struct {
+	wcs   WCS
+	axis  Axis
+	value float64
 }
 
 func (f *fakeRuntime) SendLineAndWaitOK(_ context.Context, line string) error {
@@ -24,14 +33,25 @@ func (f *fakeRuntime) SendLineCollectingResponses(_ context.Context, line string
 	f.sent = append(f.sent, line)
 	return nil, nil
 }
-func (f *fakeRuntime) ReadWCSOffsets(context.Context) (WCSOffsets, error)       { return nil, nil }
-func (f *fakeRuntime) WriteWCSOffset(context.Context, WCS, Axis, float64) error { return nil }
-func (f *fakeRuntime) CurrentMachinePosition() (Point, bool)                    { return Point{}, false }
-func (f *fakeRuntime) CurrentWorkPosition() (Point, bool)                       { return Point{}, false }
-func (f *fakeRuntime) LastProbePoint() (Point, bool)                            { return Point{}, false }
-func (f *fakeRuntime) RunProbe(context.Context, string) (Point, error)          { return Point{}, nil }
-func (f *fakeRuntime) Variables() *VariableStore                                { return f.vars }
-func (f *fakeRuntime) Contour() *ContourState                                   { return f.contour }
+func (f *fakeRuntime) ReadWCSOffsets(context.Context) (WCSOffsets, error) {
+	f.readWCS++
+	return f.offsets, nil
+}
+func (f *fakeRuntime) WriteWCSOffset(_ context.Context, wcs WCS, axis Axis, value float64) error {
+	f.writes = append(f.writes, wcsWrite{wcs: wcs, axis: axis, value: value})
+	return nil
+}
+func (f *fakeRuntime) CurrentMachinePosition() (Point, bool)           { return Point{}, false }
+func (f *fakeRuntime) CurrentWorkPosition() (Point, bool)              { return Point{}, false }
+func (f *fakeRuntime) LastProbePoint() (Point, bool)                   { return Point{}, false }
+func (f *fakeRuntime) RunProbe(context.Context, string) (Point, error) { return Point{}, nil }
+func (f *fakeRuntime) Variables() *VariableStore {
+	if f.vars == nil {
+		f.vars = NewVariableStore()
+	}
+	return f.vars
+}
+func (f *fakeRuntime) Contour() *ContourState { return f.contour }
 
 func TestParseInvocation(t *testing.T) {
 	t.Parallel()
