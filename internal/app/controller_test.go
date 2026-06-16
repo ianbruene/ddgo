@@ -459,6 +459,7 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 	path := writeProgramFile(t, "demo.gcode", "(comment)\nG21\nG0 X1\nG0 Y2 ; move\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -623,6 +624,7 @@ func TestControllerProgramPauseResumeStopAndModalBlocking(t *testing.T) {
 	path := writeProgramFile(t, "job.gcode", "G0 X1\nG0 X2\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -736,6 +738,7 @@ func TestControllerStartProgramCanceledContext(t *testing.T) {
 	path := writeProgramFile(t, "canceled.gcode", "G0 X1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -763,6 +766,7 @@ func TestControllerPauseResumeWriteFailureKeepsState(t *testing.T) {
 	path := writeProgramFile(t, "pause-fail.gcode", "G0 X1\nG0 X2\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -921,6 +925,21 @@ func ensureNoEvent(t *testing.T, ch <-chan Event, dur time.Duration) {
 	}
 }
 
+func ensureNoErrorEvent(t *testing.T, ch <-chan Event, dur time.Duration) {
+	t.Helper()
+	deadline := time.After(dur)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Kind == EventError {
+				t.Fatalf("unexpected error event: %+v", ev)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 func waitForState(t *testing.T, controller *Controller, fn func(State) bool) State {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -1034,6 +1053,7 @@ func TestControllerUnregisteredMCodePassesThrough(t *testing.T) {
 	path := writeProgramFile(t, "unregistered-m.gcode", "M42 P1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	controller.SetMacroEngine(macro.NewEngine(macro.NewRegistry()))
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
@@ -1061,6 +1081,7 @@ func TestControllerRegisteredMacroInterceptsAndAdvances(t *testing.T) {
 	path := writeProgramFile(t, "registered-m.gcode", "M42 P1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	reg := macro.NewRegistry()
 	called := false
 	reg.Register(42, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
@@ -1098,6 +1119,7 @@ func TestControllerMacroFailureMarksProgramFailed(t *testing.T) {
 	path := writeProgramFile(t, "macro-fail.gcode", "M77\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	reg := macro.NewRegistry()
 	reg.Register(77, macro.HandlerFunc(func(context.Context, macro.Runtime, macro.Invocation) error {
 		return errors.New("macro condition failed")
@@ -1131,6 +1153,7 @@ func TestControllerMacroHandlerCanSendControllerLines(t *testing.T) {
 	path := writeProgramFile(t, "macro-send.gcode", "M88\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	reg := macro.NewRegistry()
 	reg.Register(88, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
 		if err := runtime.SendLineAndWaitOK(ctx, "G0 X1"); err != nil {
@@ -1170,6 +1193,7 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 	path := writeProgramFile(t, "macro-query.gcode", "M90\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	reg := macro.NewRegistry()
 	received := make(chan []string, 1)
 	reg.Register(90, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
@@ -1221,6 +1245,7 @@ func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
 	path := writeProgramFile(t, "macro-query-error.gcode", "M91\nG0 X9\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	reg := macro.NewRegistry()
 	reg.Register(91, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
 		_, err := runtime.SendLineCollectingResponses(ctx, "$#")
@@ -1263,6 +1288,7 @@ func TestControllerReadWCSOffsetsUsesQueryHelper(t *testing.T) {
 	path := writeProgramFile(t, "macro-read-wcs.gcode", "M92\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	reg := macro.NewRegistry()
 	received := make(chan macro.WCSOffsets, 1)
 	reg.Register(92, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
@@ -1316,6 +1342,7 @@ func TestControllerNormalProgramSendIgnoresIntermediateRX(t *testing.T) {
 	path := writeProgramFile(t, "normal-intermediate.gcode", "G0 X1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -1350,6 +1377,7 @@ func TestControllerNormalLongRunningLineIgnoresNonTerminalRXBurst(t *testing.T) 
 	path := writeProgramFile(t, "normal-rx-burst.gcode", "G0 X1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -1444,6 +1472,7 @@ func TestControllerMotionRewrite(t *testing.T) {
 	path := writeProgramFile(t, "rewrite.gcode", "G0 X1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	controller.SetMotionRewriter(testRewriter{line: "G0 X2"})
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
@@ -1471,6 +1500,7 @@ func TestControllerMotionRewriteErrorFailsProgram(t *testing.T) {
 	path := writeProgramFile(t, "rewrite-fail.gcode", "G0 X1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	controller.SetMotionRewriter(testRewriter{err: errors.New("surface missing")})
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
@@ -1499,6 +1529,7 @@ func TestControllerDefaultM108FailurePreventsLaterGCode(t *testing.T) {
 	path := writeProgramFile(t, "default-macro-missing-var.gcode", "M108 missing G54Z\nG0 X9\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -1520,10 +1551,10 @@ func TestControllerDefaultM108FailurePreventsLaterGCode(t *testing.T) {
 	}
 }
 
-func TestControllerPrefixLikeDefaultMacroPassesThrough(t *testing.T) {
+func TestControllerDefaultMacrosDoNotInterceptDottedMCode(t *testing.T) {
 	t.Parallel()
 
-	path := writeProgramFile(t, "prefix-like-macro.gcode", "M107.1\n")
+	path := writeProgramFile(t, "dotted-mcode.gcode", "M107.1\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
 	controller.statusPollInterval = 10 * time.Second
@@ -1538,7 +1569,7 @@ func TestControllerPrefixLikeDefaultMacroPassesThrough(t *testing.T) {
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
-	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program prefix-like-macro.gcode")
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program dotted-mcode.gcode")
 	waitForWrites(t, fake, 1)
 	if got, want := fake.Written()[0].Display, "M107.1"; got != want {
 		t.Fatalf("written line = %q, want %q", got, want)
@@ -1567,6 +1598,10 @@ func TestControllerFinishProgramFailureCancelsActiveRun(t *testing.T) {
 	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
 	if got, want := state.LastError, "forced failure"; got != want {
 		t.Fatalf("LastError = %q, want %q", got, want)
+	}
+	errEv := waitForEvent(t, controller.Events(), EventError)
+	if got, want := errEv.Text, "forced failure"; got != want {
+		t.Fatalf("error text = %q, want %q", got, want)
 	}
 }
 
@@ -1639,5 +1674,5 @@ func TestControllerForcedFailureDoesNotEmitContextCanceledError(t *testing.T) {
 		t.Fatalf("first error event = %q, want %q", got, want)
 	}
 
-	ensureNoEvent(t, controller.Events(), 150*time.Millisecond)
+	ensureNoErrorEvent(t, controller.Events(), 150*time.Millisecond)
 }
