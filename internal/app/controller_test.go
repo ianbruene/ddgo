@@ -1050,7 +1050,7 @@ func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
 func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 	t.Parallel()
 
-	path := writeProgramFile(t, "default-m100-midpoint.gcode", "M100 G54X G55Z G56Y\n")
+	path := writeProgramFile(t, "default-m100-midpoint.gcode", "M100 G54X G55X G56X\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
 	controller.statusPollInterval = 10 * time.Second
@@ -1071,11 +1071,11 @@ func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 		t.Fatalf("first written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G54:1.000,0.000,0.000]")
-	fake.InjectRX("[G55:0.000,0.000,3.000]")
+	fake.InjectRX("[G55:3.000,0.000,0.000]")
 	fake.InjectRX("[G56:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G10 L2 P3 Y2.000000"; got != want {
+	if got, want := fake.Written()[1].Display, "G10 L2 P3 X2.000000"; got != want {
 		t.Fatalf("second written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -1083,7 +1083,7 @@ func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 	if got, want := fake.Written()[2].Display, "$#"; got != want {
 		t.Fatalf("third written line = %q, want %q", got, want)
 	}
-	fake.InjectRX("[G56:0.000,2.000,0.000]")
+	fake.InjectRX("[G56:2.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
 	for _, written := range fake.Written() {
@@ -1093,7 +1093,55 @@ func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 	}
 }
 
-func TestControllerDefaultM101PassesAndSendsNextLine(t *testing.T) {
+func TestControllerDefaultM100VerificationFailureFailsProgram(t *testing.T) {
+	t.Parallel()
+
+	path := writeProgramFile(t, "default-m100-verify-fail.gcode", "M100 G54X G55X G56X\nG0 X9\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-m100-verify-fail.gcode")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("first written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("[G54:1.000,0.000,0.000]")
+	fake.InjectRX("[G55:3.000,0.000,0.000]")
+	fake.InjectRX("[G56:0.000,0.000,0.000]")
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	if got, want := fake.Written()[1].Display, "G10 L2 P3 X2.000000"; got != want {
+		t.Fatalf("second written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 3)
+	if got, want := fake.Written()[2].Display, "$#"; got != want {
+		t.Fatalf("third written line = %q, want %q", got, want)
+	}
+	fake.InjectRX("[G56:2.100,0.000,0.000]")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "macro M100 failed at line 1") && strings.Contains(s.LastError, "M100 verification failed")
+	})
+	for _, written := range fake.Written() {
+		if written.Display == "G0 X9" || strings.HasPrefix(written.Display, "M100") {
+			t.Fatalf("unexpected write after failed macro: %#v", fake.Written())
+		}
+	}
+}
+
+func TestControllerDefaultM101PassAllowsNextLine(t *testing.T) {
 	t.Parallel()
 
 	path := writeProgramFile(t, "default-m101-pass.gcode", "M101 G54X G55X 0.010\nG0 X1\n")
@@ -1125,9 +1173,14 @@ func TestControllerDefaultM101PassesAndSendsNextLine(t *testing.T) {
 	}
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
+	for _, written := range fake.Written() {
+		if strings.HasPrefix(written.Display, "M101") {
+			t.Fatalf("raw M101 was sent: %#v", fake.Written())
+		}
+	}
 }
 
-func TestControllerDefaultM101FailurePreventsLaterGCode(t *testing.T) {
+func TestControllerDefaultM101FailurePreventsNextLine(t *testing.T) {
 	t.Parallel()
 
 	path := writeProgramFile(t, "default-m101-fail.gcode", "M101 G54X G55X 0.001\nG0 X9\n")

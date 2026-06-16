@@ -51,24 +51,26 @@ DDGo has query-scoped response collection for macro/runtime queries:
 
 ## Macro framework
 
-The `internal/macro` package currently provides framework support, not a production batch of built-in command handlers.
+The `internal/macro` package provides the application-level macro interception framework plus the current default batch of built-in command handlers. The default controller installs `macro.NewDefaultEngine()`, so registered built-ins are intercepted during normal program execution instead of being sent raw to the controller.
 
 Implemented framework pieces include:
 
 - `macro.Invocation`, which carries the source `gcode.Line`, leading M-code number, `RawArgs`, and `CleanArgs`.
-- Raw vs clean argument handling so future handlers can choose between original line content and comment-stripped sanitized content.
+- Raw vs clean argument handling so handlers can choose between original line content and comment-stripped sanitized content.
 - `macro.Registry` for registering handlers by leading M-code number.
 - `macro.Engine` for parsing a program line and dispatching to a registered handler.
 - `macro.Handler` and `macro.HandlerFunc`.
 - Typed nil `HandlerFunc` protection.
 - `macro.Error`, which wraps handler errors with source line and code context.
 - `macro.Runtime`, the controller-facing capability interface exposed to handlers.
+- Default handlers for M100, M101, M107, and M108. Command syntax details live in `docs/macros.md`.
+
+Empty registries and custom macro engines remain available for tests and specialized flows through `SetMacroEngine`.
 
 Currently deferred macro behavior:
 
-- No built-in production macro handler batch is installed yet.
-- No probe-backed macro behavior is implemented yet.
-- No contour motion compensation is implemented yet.
+- Probe-backed macro behavior is not implemented yet.
+- Contour motion compensation is not implemented yet.
 
 ## Contour state
 

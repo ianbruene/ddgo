@@ -11,10 +11,25 @@ import (
 
 func TestDefaultRegistration(t *testing.T) {
 	RegisterDefaultHandlers(nil)
+	if _, ok := NewRegistry().Handler(100); ok {
+		t.Fatal("NewRegistry registered M100")
+	}
+	if _, ok := NewRegistry().Handler(101); ok {
+		t.Fatal("NewRegistry registered M101")
+	}
 	if _, ok := NewRegistry().Handler(107); ok {
 		t.Fatal("NewRegistry registered M107")
 	}
+	if _, ok := NewRegistry().Handler(108); ok {
+		t.Fatal("NewRegistry registered M108")
+	}
 	reg := NewDefaultRegistry()
+	if _, ok := reg.Handler(100); !ok {
+		t.Fatal("M100 not registered")
+	}
+	if _, ok := reg.Handler(101); !ok {
+		t.Fatal("M101 not registered")
+	}
 	if _, ok := reg.Handler(107); !ok {
 		t.Fatal("M107 not registered")
 	}
