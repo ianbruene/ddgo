@@ -21,7 +21,6 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 
 ## What is not implemented yet
 
-- M102/M106 expression/assertion handlers are not implemented yet.
 - Probe execution through the macro runtime is not implemented yet.
 - Probe result capture is not implemented yet.
 - Contour motion rewriting / Z compensation is not implemented yet.
@@ -88,7 +87,6 @@ Notes:
 
 Current roadmap:
 
-- Implement expression/assertion macro handlers.
 - Implement probe command execution and probe result parsing.
 - Implement contour surface fitting and motion rewriting.
 - Add configurable machine profile support.

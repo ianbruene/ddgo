@@ -438,6 +438,16 @@ func countStatusWrites(writes []transport.Message) int {
 	return count
 }
 
+func countDisplayWrites(writes []transport.Message, display string) int {
+	count := 0
+	for _, write := range writes {
+		if write.Display == display {
+			count++
+		}
+	}
+	return count
+}
+
 func waitForEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -1866,7 +1876,7 @@ func TestControllerForcedFailureDoesNotEmitContextCanceledError(t *testing.T) {
 	ensureNoErrorEvent(t, controller.Events(), 150*time.Millisecond)
 }
 
-func TestControllerDefaultM102NumericExpression(t *testing.T) {
+func TestControllerDefaultM102NumericExpressionWritesWithoutWCSQuery(t *testing.T) {
 	t.Parallel()
 	path := writeProgramFile(t, "default-m102-numeric.gcode", "M102 G54Z = (1 + 2) * 3\n")
 	fake := transport.NewFakeTransport()
@@ -1896,7 +1906,7 @@ func TestControllerDefaultM102NumericExpression(t *testing.T) {
 	}
 }
 
-func TestControllerDefaultM102WCSExpression(t *testing.T) {
+func TestControllerDefaultM102WCSExpressionReadsOnceAndWrites(t *testing.T) {
 	t.Parallel()
 	path := writeProgramFile(t, "default-m102-wcs.gcode", "M102 G56Z = (G54Z + G55Z) / 2\n")
 	fake := transport.NewFakeTransport()
@@ -1917,8 +1927,9 @@ func TestControllerDefaultM102WCSExpression(t *testing.T) {
 	if fake.Written()[0].Display != "$#" {
 		t.Fatalf("first = %q", fake.Written()[0].Display)
 	}
-	fake.InjectRX("[G54:0,0,1]")
-	fake.InjectRX("[G55:0,0,5]")
+	fake.InjectRX("[G54:0.000,0.000,1.000]")
+	fake.InjectRX("[G55:0.000,0.000,5.000]")
+	fake.InjectRX("[G56:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
 	if got, want := fake.Written()[1].Display, "G10 L2 P3 Z3.000000"; got != want {
@@ -1926,6 +1937,14 @@ func TestControllerDefaultM102WCSExpression(t *testing.T) {
 	}
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+	for _, written := range fake.Written() {
+		if strings.HasPrefix(written.Display, "M102") {
+			t.Fatalf("raw M102 was sent: %#v", fake.Written())
+		}
+	}
+	if got := countDisplayWrites(fake.Written(), "$#"); got != 1 {
+		t.Fatalf("WCS query count = %d, want 1; writes=%#v", got, fake.Written())
+	}
 }
 
 func TestControllerDefaultM102FailurePreventsNextLine(t *testing.T) {
@@ -1976,8 +1995,8 @@ func TestControllerDefaultM106PassAllowsNextLine(t *testing.T) {
 	if fake.Written()[0].Display != "$#" {
 		t.Fatalf("first = %q", fake.Written()[0].Display)
 	}
-	fake.InjectRX("[G54:0,0,1]")
-	fake.InjectRX("[G55:0,0,2]")
+	fake.InjectRX("[G54:0.000,0.000,1.000]")
+	fake.InjectRX("[G55:0.000,0.000,2.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
 	if got, want := fake.Written()[1].Display, "G0 X1"; got != want {
@@ -1985,6 +2004,11 @@ func TestControllerDefaultM106PassAllowsNextLine(t *testing.T) {
 	}
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
+	for _, written := range fake.Written() {
+		if strings.HasPrefix(written.Display, "M106") {
+			t.Fatalf("raw M106 was sent: %#v", fake.Written())
+		}
+	}
 }
 
 func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
@@ -2005,8 +2029,11 @@ func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
-	fake.InjectRX("[G54:0,0,3]")
-	fake.InjectRX("[G55:0,0,2]")
+	if got, want := fake.Written()[0].Display, "$#"; got != want {
+		t.Fatalf("first = %q, want %q", got, want)
+	}
+	fake.InjectRX("[G54:0.000,0.000,3.000]")
+	fake.InjectRX("[G55:0.000,0.000,2.000]")
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool {
 		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "macro M106 failed at line 1") && strings.Contains(s.LastError, "expected G54Z")
@@ -2014,6 +2041,39 @@ func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
 	for _, w := range fake.Written() {
 		if w.Display == "G0 X9" || strings.HasPrefix(w.Display, "M106") {
 			t.Fatalf("unexpected write: %#v", fake.Written())
+		}
+	}
+}
+
+func TestControllerDefaultM106NumericAssertionDoesNotReadWCS(t *testing.T) {
+	t.Parallel()
+	path := writeProgramFile(t, "default-m106-numeric.gcode", "M106 1 < 2\nG0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+		t.Fatalf("first = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
+	for _, written := range fake.Written() {
+		if strings.HasPrefix(written.Display, "M106") {
+			t.Fatalf("raw M106 was sent: %#v", fake.Written())
+		}
+		if written.Display == "$#" {
+			t.Fatalf("unexpected WCS query: %#v", fake.Written())
 		}
 	}
 }
