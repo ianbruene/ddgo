@@ -19,6 +19,9 @@ type fakeRuntime struct {
 	offsetReads []WCSOffsets
 	readErrs    []error
 	writeErr    error
+	probePoint  Point
+	probeErr    error
+	probeArgs   []string
 	readWCS     int
 	writes      []wcsWrite
 }
@@ -57,10 +60,13 @@ func (f *fakeRuntime) WriteWCSOffset(_ context.Context, wcs WCS, axis Axis, valu
 	f.writes = append(f.writes, wcsWrite{wcs: wcs, axis: axis, value: value})
 	return f.writeErr
 }
-func (f *fakeRuntime) CurrentMachinePosition() (Point, bool)           { return Point{}, false }
-func (f *fakeRuntime) CurrentWorkPosition() (Point, bool)              { return Point{}, false }
-func (f *fakeRuntime) LastProbePoint() (Point, bool)                   { return Point{}, false }
-func (f *fakeRuntime) RunProbe(context.Context, string) (Point, error) { return Point{}, nil }
+func (f *fakeRuntime) CurrentMachinePosition() (Point, bool) { return Point{}, false }
+func (f *fakeRuntime) CurrentWorkPosition() (Point, bool)    { return Point{}, false }
+func (f *fakeRuntime) LastProbePoint() (Point, bool)         { return Point{}, false }
+func (f *fakeRuntime) RunProbe(_ context.Context, args string) (Point, error) {
+	f.probeArgs = append(f.probeArgs, args)
+	return f.probePoint, f.probeErr
+}
 func (f *fakeRuntime) Variables() *VariableStore {
 	if f.noVars {
 		return nil

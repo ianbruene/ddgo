@@ -17,6 +17,7 @@ func RegisterDefaultHandlers(registry *Registry) {
 	registry.Register(106, HandlerFunc(handleM106))
 	registry.Register(107, HandlerFunc(handleM107))
 	registry.Register(108, HandlerFunc(handleM108))
+	registry.Register(109, HandlerFunc(handleM109))
 }
 
 func NewDefaultRegistry() *Registry { r := NewRegistry(); RegisterDefaultHandlers(r); return r }
@@ -270,6 +271,21 @@ func handleM108(ctx context.Context, runtime Runtime, inv Invocation) error {
 		return fmt.Errorf("unknown variable %q", name)
 	}
 	return runtime.WriteWCSOffset(ctx, ref.WCS, ref.Axis, value)
+}
+
+func handleM109(ctx context.Context, runtime Runtime, inv Invocation) error {
+	if strings.TrimSpace(inv.RawArgs) == "" {
+		return fmt.Errorf("missing probe command")
+	}
+	point, err := runtime.RunProbe(ctx, inv.RawArgs)
+	if err != nil {
+		return err
+	}
+	contour := runtime.Contour()
+	if contour == nil {
+		return fmt.Errorf("contour state is not available")
+	}
+	return contour.AddPoint(point)
 }
 
 func splitNameAndRemainder(args string) (string, string, error) {
