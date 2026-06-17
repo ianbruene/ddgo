@@ -1458,6 +1458,165 @@ func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
 	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
 }
 
+func setupProbeMacroProgram(t *testing.T, name, program string) (*Controller, *transport.FakeTransport, <-chan macro.Point) {
+	t.Helper()
+	path := writeProgramFile(t, name, program)
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	gotPoint := make(chan macro.Point, 1)
+	reg := macro.NewRegistry()
+	reg.Register(92, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, inv macro.Invocation) error {
+		point, err := runtime.RunProbe(ctx, inv.RawArgs)
+		if err != nil {
+			return err
+		}
+		gotPoint <- point
+		return nil
+	}))
+	controller.SetMacroEngine(macro.NewEngine(reg))
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program "+name)
+	return controller, fake, gotPoint
+}
+
+func waitForProbePoint(t *testing.T, ch <-chan macro.Point) macro.Point {
+	t.Helper()
+	select {
+	case point := <-ch:
+		return point
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for probe point")
+		return macro.Point{}
+	}
+}
+
+func TestControllerRunProbeCapturesLastProbePoint(t *testing.T) {
+	t.Parallel()
+
+	controller, fake, gotPoint := setupProbeMacroProgram(t, "macro-probe-success.gcode", "M92 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+		t.Fatalf("probe write = %q, want %q", got, want)
+	}
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:1]")
+	fake.InjectRX("ok")
+
+	want := macro.Point{X: 1, Y: 2, Z: -3.5}
+	if got := waitForProbePoint(t, gotPoint); got != want {
+		t.Fatalf("probe point = %#v, want %#v", got, want)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+	got, ok := controller.LastProbePoint()
+	if !ok || got != want {
+		t.Fatalf("LastProbePoint() = %#v, %v; want %#v, true", got, ok, want)
+	}
+}
+
+func TestControllerRunProbeNoContactFailsAndDoesNotUpdateLastProbe(t *testing.T) {
+	t.Parallel()
+
+	controller, fake, _ := setupProbeMacroProgram(t, "macro-probe-no-contact.gcode", "M92 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+		t.Fatalf("probe write = %q, want %q", got, want)
+	}
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:0]")
+	fake.InjectRX("ok")
+
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M92 failed at line 1") || !strings.Contains(state.LastError, "probe did not contact") {
+		t.Fatalf("LastError = %q, want macro context and no-contact text", state.LastError)
+	}
+	if got, ok := controller.LastProbePoint(); ok {
+		t.Fatalf("LastProbePoint() = %#v, true; want false", got)
+	}
+}
+
+func TestControllerRunProbeMissingResultFailsAndDoesNotUpdateLastProbe(t *testing.T) {
+	t.Parallel()
+
+	controller, fake, _ := setupProbeMacroProgram(t, "macro-probe-missing-result.gcode", "M92 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("ok")
+
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M92 failed at line 1") || !strings.Contains(state.LastError, "probe result not reported") {
+		t.Fatalf("LastError = %q, want macro context and missing result text", state.LastError)
+	}
+	if got, ok := controller.LastProbePoint(); ok {
+		t.Fatalf("LastProbePoint() = %#v, true; want false", got)
+	}
+}
+
+func TestControllerRunProbeControllerErrorFailsAndDoesNotUpdateLastProbe(t *testing.T) {
+	t.Parallel()
+
+	controller, fake, _ := setupProbeMacroProgram(t, "macro-probe-controller-error.gcode", "M92 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("error:5")
+
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M92 failed at line 1") || !strings.Contains(state.LastError, "query command failed: error:5") {
+		t.Fatalf("LastError = %q, want macro context and query failure text", state.LastError)
+	}
+	if got, ok := controller.LastProbePoint(); ok {
+		t.Fatalf("LastProbePoint() = %#v, true; want false", got)
+	}
+}
+
+func TestControllerRunProbeMissingCommandErrorsBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	controller, fake, _ := setupProbeMacroProgram(t, "macro-probe-missing-command.gcode", "M92\n")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M92 failed at line 1") || !strings.Contains(state.LastError, "missing probe command") {
+		t.Fatalf("LastError = %q, want macro context and missing command text", state.LastError)
+	}
+	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
+}
+
+func TestControllerRunProbeFailurePreservesPreviousLastProbe(t *testing.T) {
+	t.Parallel()
+
+	controller, fake, gotPoint := setupProbeMacroProgram(t, "macro-probe-preserve-success.gcode", "M92 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("[PRB:4.000,5.000,-6.000:1]")
+	fake.InjectRX("ok")
+	want := macro.Point{X: 4, Y: 5, Z: -6}
+	if got := waitForProbePoint(t, gotPoint); got != want {
+		t.Fatalf("probe point = %#v, want %#v", got, want)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+
+	path := writeProgramFile(t, "macro-probe-preserve-failure.gcode", "M92 G38.2 Z-5 F100\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() second error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-probe-preserve-failure.gcode")
+	waitForWrites(t, fake, 2)
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:0]")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if got, ok := controller.LastProbePoint(); !ok || got != want {
+		t.Fatalf("LastProbePoint() = %#v, %v; want %#v, true", got, ok, want)
+	}
+}
+
 func TestControllerReadWCSOffsetsUsesQueryHelper(t *testing.T) {
 	t.Parallel()
 
