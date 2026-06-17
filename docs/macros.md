@@ -118,6 +118,7 @@ Registered handlers can use the current runtime to:
 - read WCS offsets through `$#`;
 - write WCS offsets through `G10 L2`;
 - read current machine and work positions from parsed status reports;
+- run probe commands during an active program and read the last successful probe point;
 - access process-local variables;
 - access contour state.
 
@@ -126,13 +127,11 @@ Registered handlers can use the current runtime to:
 - Only `M100`, `M101`, `M102`, `M106`, `M107`, and `M108` are registered by the default macro engine.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
-- The probe runtime method currently returns not-available.
-- Probe result parsing/capture is not implemented yet.
+- Default probe-backed macro handlers are not implemented yet.
 - Contour point probing is not implemented yet.
 - Contour motion rewriting is not implemented yet.
 
 ## Planned macro implementation order
 
-1. Probe execution and probe result capture.
-2. Contour point collection.
-3. Contour surface fitting and motion rewriting.
+1. Contour point collection.
+2. Contour surface fitting and motion rewriting.

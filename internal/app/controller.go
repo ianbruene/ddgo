@@ -692,7 +692,30 @@ func (c *Controller) LastProbePoint() (macro.Point, bool) {
 }
 
 func (c *Controller) RunProbe(ctx context.Context, args string) (macro.Point, error) {
-	return macro.Point{}, errors.New("run probe is not available yet")
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return macro.Point{}, errors.New("missing probe command")
+	}
+	lines, err := c.SendLineCollectingResponses(ctx, args)
+	if err != nil {
+		return macro.Point{}, err
+	}
+	for _, line := range lines {
+		result, ok := grbl.ParseProbeResult(line)
+		if !ok {
+			continue
+		}
+		if !result.Success {
+			return macro.Point{}, errors.New("probe did not contact")
+		}
+		point := macro.Point{X: result.Position[0], Y: result.Position[1], Z: result.Position[2]}
+		c.mu.Lock()
+		c.lastProbe = point
+		c.hasLastProbe = true
+		c.mu.Unlock()
+		return point, nil
+	}
+	return macro.Point{}, errors.New("probe result not reported")
 }
 
 func (c *Controller) Variables() *macro.VariableStore { return c.variables }
