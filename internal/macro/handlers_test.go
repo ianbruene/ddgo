@@ -329,6 +329,25 @@ func TestM102WritesExpressions(t *testing.T) {
 	}
 }
 
+func TestM102VariableContainingWCSSubstringDoesNotReadWCS(t *testing.T) {
+	rt := &fakeRuntime{}
+	rt.Variables().Set("depthG54Z", 2)
+
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{
+		Raw:  "M102 G55X = depthG54Z + 1",
+		Text: "M102 G55X = depthG54Z + 1",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch error = %v", err)
+	}
+	if rt.readWCS != 0 {
+		t.Fatalf("readWCS = %d, want 0", rt.readWCS)
+	}
+	if len(rt.writes) != 1 || rt.writes[0] != (wcsWrite{wcs: "G55", axis: AxisX, value: 3}) {
+		t.Fatalf("writes = %#v", rt.writes)
+	}
+}
+
 func TestM102Errors(t *testing.T) {
 	for _, tt := range []struct{ line, want string }{
 		{"M102", "missing destination WCS axis"}, {"M102 G54Z", "missing expression"}, {"M102 G60Z = 1", "unsupported WCS"},

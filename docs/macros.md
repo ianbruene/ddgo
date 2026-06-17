@@ -133,7 +133,6 @@ Registered handlers can use the current runtime to:
 
 ## Planned macro implementation order
 
-1. Additional non-probe WCS, comparison, and expression handlers.
-2. Probe execution and probe result capture.
-3. Contour point collection.
-4. Contour surface fitting and motion rewriting.
+1. Probe execution and probe result capture.
+2. Contour point collection.
+3. Contour surface fitting and motion rewriting.
