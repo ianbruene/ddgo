@@ -438,16 +438,6 @@ func countStatusWrites(writes []transport.Message) int {
 	return count
 }
 
-func countDisplayWrites(writes []transport.Message, display string) int {
-	count := 0
-	for _, write := range writes {
-		if write.Display == display {
-			count++
-		}
-	}
-	return count
-}
-
 func waitForEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -898,6 +888,16 @@ func writeProgramFile(t *testing.T, name string, contents string) string {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
+}
+
+func countDisplayWrites(writes []transport.Message, display string) int {
+	count := 0
+	for _, write := range writes {
+		if write.Display == display {
+			count++
+		}
+	}
+	return count
 }
 
 func waitForWrites(t *testing.T, fake *transport.FakeTransport, want int) {
