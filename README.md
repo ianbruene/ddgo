@@ -16,13 +16,14 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 - Macro interception framework for registered application-level macro handlers, with default built-in handlers for M100 midpoint write/verify, M101 WCS comparison, M102 expression write, M106 assertions, M107 variable store, M108 variable writeback, and M109 contour point collection.
 - Macro runtime query support for collecting query responses during an active program run.
 - Macro runtime probe execution and last successful probe point capture.
+- Contour point collection through the default M109 probe-backed macro handler.
 - WCS offset read/write helper support using `$#` and `G10 L2`.
 - Process-local variable store and contour state primitives.
 - Contour mode lifecycle reset on program start and program failure.
 
 ## What is not implemented yet
 
-- Contour motion rewriting / Z compensation is not implemented yet.
+- Contour surface fitting / motion rewriting / Z compensation is not implemented yet.
 - Machine profile/configuration is still future work.
 - Persistent user settings are still future work.
 
