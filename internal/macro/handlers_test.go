@@ -29,6 +29,9 @@ func TestDefaultRegistration(t *testing.T) {
 	if _, ok := NewRegistry().Handler(108); ok {
 		t.Fatal("NewRegistry registered M108")
 	}
+	if _, ok := NewRegistry().Handler(109); ok {
+		t.Fatal("NewRegistry registered M109")
+	}
 	reg := NewDefaultRegistry()
 	if _, ok := reg.Handler(100); !ok {
 		t.Fatal("M100 not registered")
@@ -47,6 +50,9 @@ func TestDefaultRegistration(t *testing.T) {
 	}
 	if _, ok := reg.Handler(108); !ok {
 		t.Fatal("M108 not registered")
+	}
+	if _, ok := reg.Handler(109); !ok {
+		t.Fatal("M109 not registered")
 	}
 	rt := &fakeRuntime{}
 	handled, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Number: 1, Raw: "M107 depth 1.5", Text: "M107 depth 1.5"})
@@ -398,5 +404,50 @@ func TestM106Errors(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Fatalf("%q error=%v, want %q", tt.line, err, tt.want)
 		}
+	}
+}
+
+func TestM109CollectsContourPoint(t *testing.T) {
+	rt := &fakeRuntime{contour: NewContourState(), probePoint: Point{X: 1, Y: 2, Z: -3.5}}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M109 G38.2 Z-5 F100 ; keep raw", Text: "M109 G38.2 Z-5 F100"})
+	if err != nil {
+		t.Fatalf("Dispatch error = %v", err)
+	}
+	if len(rt.probeArgs) != 1 || rt.probeArgs[0] != "G38.2 Z-5 F100 ; keep raw" {
+		t.Fatalf("RunProbe args = %#v, want exact raw args", rt.probeArgs)
+	}
+	if got, want := rt.contour.Points(), []Point{{X: 1, Y: 2, Z: -3.5}}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("contour points = %#v, want %#v", got, want)
+	}
+}
+
+func TestM109Errors(t *testing.T) {
+	runErr := errors.New("probe failed")
+	tests := []struct {
+		name      string
+		line      string
+		rt        *fakeRuntime
+		want      string
+		wantCalls int
+	}{
+		{"missing command", "M109", &fakeRuntime{contour: NewContourState()}, "missing probe command", 0},
+		{"probe error", "M109 G38.2 Z-5 F100", &fakeRuntime{contour: NewContourState(), probeErr: runErr}, "probe failed", 1},
+		{"nil contour", "M109 G38.2 Z-5 F100", &fakeRuntime{probePoint: Point{X: 1, Y: 2, Z: 3}}, "contour state is not available", 1},
+		{"duplicate", "M109 G38.2 Z-5 F100", func() *fakeRuntime {
+			c := NewContourState()
+			_ = c.AddPoint(Point{X: 1, Y: 2, Z: 0})
+			return &fakeRuntime{contour: c, probePoint: Point{X: 1, Y: 2, Z: -3.5}}
+		}(), "duplicate contour point", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewDefaultEngine().Dispatch(context.Background(), tt.rt, gcode.Line{Raw: tt.line, Text: tt.line})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+			if len(tt.rt.probeArgs) != tt.wantCalls {
+				t.Fatalf("RunProbe calls = %d, want %d", len(tt.rt.probeArgs), tt.wantCalls)
+			}
+		})
 	}
 }

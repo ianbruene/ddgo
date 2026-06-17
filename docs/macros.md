@@ -109,6 +109,25 @@ M107 depth -1.25
 M108 depth G54Z
 ```
 
+
+### `M109` — probe and collect a contour point
+
+Syntax:
+
+```gcode
+M109 <probe-command>
+```
+
+`M109` runs the probe command text after the leading macro code through the macro runtime probe path. A successful controller probe result such as `[PRB:x,y,z:1]` is stored in the contour point state as the absolute machine-coordinate point reported by the controller. Duplicate points with the same `X` and `Y` coordinates are rejected by contour state, even if `Z` differs.
+
+`M109` only collects contour points. It does not enable contour compensation, fit a surface, rewrite motion, or apply Z compensation. Failed probes, no-contact probe results, missing probe results, controller errors, alarms, and missing probe commands fail the macro and do not add a contour point.
+
+Example:
+
+```gcode
+M109 G38.2 Z-5 F100
+```
+
 ## Runtime capabilities currently available
 
 Registered handlers can use the current runtime to:
@@ -124,14 +143,11 @@ Registered handlers can use the current runtime to:
 
 ## Current limitations
 
-- Only `M100`, `M101`, `M102`, `M106`, `M107`, and `M108` are registered by the default macro engine.
+- Only `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, and `M109` are registered by the default macro engine.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
-- Default probe-backed macro handlers are not implemented yet.
-- Contour point probing is not implemented yet.
 - Contour motion rewriting is not implemented yet.
 
 ## Planned macro implementation order
 
-1. Contour point collection.
-2. Contour surface fitting and motion rewriting.
+1. Contour surface fitting and motion rewriting.

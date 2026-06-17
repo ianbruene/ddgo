@@ -2239,3 +2239,90 @@ func TestControllerDefaultM106NumericAssertionDoesNotReadWCS(t *testing.T) {
 		}
 	}
 }
+
+func setupDefaultMacroProgram(t *testing.T, name, program string) (*Controller, *transport.FakeTransport) {
+	t.Helper()
+	path := writeProgramFile(t, name, program)
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program "+name)
+	return controller, fake
+}
+
+func TestControllerDefaultM109CollectsContourPoint(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m109-success.gcode", "M109 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+		t.Fatalf("probe write = %q, want %q", got, want)
+	}
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:1]")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+	want := macro.Point{X: 1, Y: 2, Z: -3.5}
+	if got, ok := controller.LastProbePoint(); !ok || got != want {
+		t.Fatalf("LastProbePoint() = %#v, %v; want %#v, true", got, ok, want)
+	}
+	if got := controller.Contour().Points(); len(got) != 1 || got[0] != want {
+		t.Fatalf("Contour().Points() = %#v, want [%#v]", got, want)
+	}
+}
+
+func TestControllerDefaultM109NoContactFailsWithoutContourPoint(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m109-no-contact.gcode", "M109 G38.2 Z-5 F100\nG0 X9\n")
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+		t.Fatalf("probe write = %q, want %q", got, want)
+	}
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:0]")
+	fake.InjectRX("ok")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M109 failed at line 1") || !strings.Contains(state.LastError, "probe did not contact") {
+		t.Fatalf("LastError = %q, want macro context and no-contact text", state.LastError)
+	}
+	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
+	if got := controller.Contour().Points(); len(got) != 0 {
+		t.Fatalf("Contour().Points() = %#v, want empty", got)
+	}
+}
+
+func TestControllerDefaultM109DuplicatePointFails(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m109-duplicate.gcode", "M109 G38.2 Z-5 F100\nM109 G38.2 Z-5 F100\n")
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:1]")
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	fake.InjectRX("[PRB:1.000,2.000,-4.500:1]")
+	fake.InjectRX("ok")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M109 failed at line 2") || !strings.Contains(state.LastError, "duplicate contour point") {
+		t.Fatalf("LastError = %q, want duplicate macro failure", state.LastError)
+	}
+	if got := controller.Contour().Points(); len(got) != 1 || got[0] != (macro.Point{X: 1, Y: 2, Z: -3.5}) {
+		t.Fatalf("Contour().Points() = %#v, want only first point", got)
+	}
+}
+
+func TestControllerDefaultM109MissingCommandFailsBeforeWrite(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m109-missing.gcode", "M109\n")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M109 failed at line 1") || !strings.Contains(state.LastError, "missing probe command") {
+		t.Fatalf("LastError = %q, want missing command macro failure", state.LastError)
+	}
+	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
+}
