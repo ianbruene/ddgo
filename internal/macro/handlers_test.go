@@ -17,6 +17,12 @@ func TestDefaultRegistration(t *testing.T) {
 	if _, ok := NewRegistry().Handler(101); ok {
 		t.Fatal("NewRegistry registered M101")
 	}
+	if _, ok := NewRegistry().Handler(102); ok {
+		t.Fatal("NewRegistry registered M102")
+	}
+	if _, ok := NewRegistry().Handler(106); ok {
+		t.Fatal("NewRegistry registered M106")
+	}
 	if _, ok := NewRegistry().Handler(107); ok {
 		t.Fatal("NewRegistry registered M107")
 	}
@@ -29,6 +35,12 @@ func TestDefaultRegistration(t *testing.T) {
 	}
 	if _, ok := reg.Handler(101); !ok {
 		t.Fatal("M101 not registered")
+	}
+	if _, ok := reg.Handler(102); !ok {
+		t.Fatal("M102 not registered")
+	}
+	if _, ok := reg.Handler(106); !ok {
+		t.Fatal("M106 not registered")
 	}
 	if _, ok := reg.Handler(107); !ok {
 		t.Fatal("M107 not registered")
@@ -278,5 +290,94 @@ func TestM101Errors(t *testing.T) {
 	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M101 G54X G55X 0.1", Text: "M101 G54X G55X 0.1"})
 	if err == nil || !strings.Contains(err.Error(), "read failed") {
 		t.Fatalf("read err = %v", err)
+	}
+}
+
+func TestM102WritesExpressions(t *testing.T) {
+	rt := &fakeRuntime{}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M102 G54Z = (1 + 2) * 3", Text: "M102 G54Z = (1 + 2) * 3"})
+	if err != nil {
+		t.Fatalf("M102 numeric error = %v", err)
+	}
+	if rt.readWCS != 0 {
+		t.Fatalf("readWCS = %d, want 0", rt.readWCS)
+	}
+	if len(rt.writes) != 1 || rt.writes[0] != (wcsWrite{wcs: "G54", axis: AxisZ, value: 9}) {
+		t.Fatalf("writes = %#v", rt.writes)
+	}
+
+	rt = &fakeRuntime{offsets: WCSOffsets{"G54": {Z: 1}, "G55": {Z: 5}}}
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M102 G56Z = (G54Z + G55Z) / 2", Text: "M102 G56Z = (G54Z + G55Z) / 2"})
+	if err != nil {
+		t.Fatalf("M102 WCS error = %v", err)
+	}
+	if rt.readWCS != 1 {
+		t.Fatalf("readWCS = %d, want 1", rt.readWCS)
+	}
+	if len(rt.writes) != 1 || rt.writes[0] != (wcsWrite{wcs: "G56", axis: AxisZ, value: 3}) {
+		t.Fatalf("writes = %#v", rt.writes)
+	}
+
+	rt = &fakeRuntime{}
+	rt.Variables().Set("depth", 0.125)
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M102 G54X = depth + 1", Text: "M102 G54X = depth + 1"})
+	if err != nil {
+		t.Fatalf("M102 var error = %v", err)
+	}
+	if len(rt.writes) != 1 || rt.writes[0].value != 1.125 {
+		t.Fatalf("writes = %#v", rt.writes)
+	}
+}
+
+func TestM102Errors(t *testing.T) {
+	for _, tt := range []struct{ line, want string }{
+		{"M102", "missing destination WCS axis"}, {"M102 G54Z", "missing expression"}, {"M102 G60Z = 1", "unsupported WCS"},
+		{"M102 G54Z =", "missing expression"}, {"M102 G54Z = 1 / 0", "division by zero"}, {"M102 G54Z = missing", "unknown variable"}, {"M102 G54Z = 1e309", "non-finite"},
+	} {
+		_, err := NewDefaultEngine().Dispatch(context.Background(), &fakeRuntime{}, gcode.Line{Raw: tt.line, Text: tt.line})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("%q error = %v, want %q", tt.line, err, tt.want)
+		}
+	}
+	rt := &fakeRuntime{writeErr: errors.New("write failed")}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M102 G54Z = 1", Text: "M102 G54Z = 1"})
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("write error = %v", err)
+	}
+}
+
+func TestM106Assertions(t *testing.T) {
+	for _, line := range []string{"M106 1 < 2", "M106 2 <= 2", "M106 3 > 2", "M106 3 >= 3", "M106 3 == 3", "M106 3 != 4"} {
+		rt := &fakeRuntime{}
+		_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: line, Text: line})
+		if err != nil {
+			t.Fatalf("%q error = %v", line, err)
+		}
+		if rt.readWCS != 0 {
+			t.Fatalf("%q readWCS = %d", line, rt.readWCS)
+		}
+	}
+	rt := &fakeRuntime{offsets: WCSOffsets{"G54": {Z: 1}, "G55": {Z: 2}}}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M106 G54Z <= G55Z", Text: "M106 G54Z <= G55Z"})
+	if err != nil || rt.readWCS != 1 {
+		t.Fatalf("WCS assertion err=%v readWCS=%d", err, rt.readWCS)
+	}
+	rt = &fakeRuntime{}
+	rt.Variables().Set("depth", -1)
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M106 depth < 0", Text: "M106 depth < 0"})
+	if err != nil {
+		t.Fatalf("var assertion error = %v", err)
+	}
+}
+
+func TestM106Errors(t *testing.T) {
+	for _, tt := range []struct{ line, want string }{
+		{"M106", "missing left operand"}, {"M106 1", "missing comparison operator"}, {"M106 1 <", "missing right operand"},
+		{"M106 2 < 1", "assertion failed"}, {"M106 2 < 1 ERROR custom failure", "custom failure"}, {"M106 missing > 0", "unknown variable"}, {"M106 G54Z < G55Z", "missing WCS offset"},
+	} {
+		_, err := NewDefaultEngine().Dispatch(context.Background(), &fakeRuntime{offsets: WCSOffsets{"G54": {Z: 1}}}, gcode.Line{Raw: tt.line, Text: tt.line})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("%q error=%v, want %q", tt.line, err, tt.want)
+		}
 	}
 }

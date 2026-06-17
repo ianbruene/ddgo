@@ -63,7 +63,7 @@ Implemented framework pieces include:
 - Typed nil `HandlerFunc` protection.
 - `macro.Error`, which wraps handler errors with source line and code context.
 - `macro.Runtime`, the controller-facing capability interface exposed to handlers.
-- Default handlers for M100, M101, M107, and M108. Command syntax details live in `docs/macros.md`.
+- Default handlers for M100, M101, M102, M106, M107, and M108. Command syntax details live in `docs/macros.md`.
 
 Empty registries and custom macro engines remain available for tests and specialized flows through `SetMacroEngine`.
 

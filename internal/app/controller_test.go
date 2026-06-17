@@ -1865,3 +1865,155 @@ func TestControllerForcedFailureDoesNotEmitContextCanceledError(t *testing.T) {
 
 	ensureNoErrorEvent(t, controller.Events(), 150*time.Millisecond)
 }
+
+func TestControllerDefaultM102NumericExpression(t *testing.T) {
+	t.Parallel()
+	path := writeProgramFile(t, "default-m102-numeric.gcode", "M102 G54Z = (1 + 2) * 3\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G10 L2 P1 Z9.000000"; got != want {
+		t.Fatalf("written = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+	for _, w := range fake.Written() {
+		if strings.HasPrefix(w.Display, "M102") || w.Display == "$#" {
+			t.Fatalf("unexpected write: %#v", fake.Written())
+		}
+	}
+}
+
+func TestControllerDefaultM102WCSExpression(t *testing.T) {
+	t.Parallel()
+	path := writeProgramFile(t, "default-m102-wcs.gcode", "M102 G56Z = (G54Z + G55Z) / 2\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+	if fake.Written()[0].Display != "$#" {
+		t.Fatalf("first = %q", fake.Written()[0].Display)
+	}
+	fake.InjectRX("[G54:0,0,1]")
+	fake.InjectRX("[G55:0,0,5]")
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	if got, want := fake.Written()[1].Display, "G10 L2 P3 Z3.000000"; got != want {
+		t.Fatalf("second = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerDefaultM102FailurePreventsNextLine(t *testing.T) {
+	t.Parallel()
+	path := writeProgramFile(t, "default-m102-fail.gcode", "M102 G54Z = 1 / 0\nG0 X9\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "macro M102 failed at line 1") && strings.Contains(s.LastError, "division by zero")
+	})
+	for _, w := range fake.Written() {
+		if w.Display == "G0 X9" || strings.HasPrefix(w.Display, "M102") {
+			t.Fatalf("unexpected write: %#v", fake.Written())
+		}
+	}
+}
+
+func TestControllerDefaultM106PassAllowsNextLine(t *testing.T) {
+	t.Parallel()
+	path := writeProgramFile(t, "default-m106-pass.gcode", "M106 G54Z <= G55Z\nG0 X1\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+	if fake.Written()[0].Display != "$#" {
+		t.Fatalf("first = %q", fake.Written()[0].Display)
+	}
+	fake.InjectRX("[G54:0,0,1]")
+	fake.InjectRX("[G55:0,0,2]")
+	fake.InjectRX("ok")
+	waitForWrites(t, fake, 2)
+	if got, want := fake.Written()[1].Display, "G0 X1"; got != want {
+		t.Fatalf("second = %q, want %q", got, want)
+	}
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
+	t.Parallel()
+	path := writeProgramFile(t, "default-m106-fail.gcode", "M106 G54Z <= G55Z ERROR expected G54Z to be below G55Z\nG0 X9\n")
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("[G54:0,0,3]")
+	fake.InjectRX("[G55:0,0,2]")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "macro M106 failed at line 1") && strings.Contains(s.LastError, "expected G54Z")
+	})
+	for _, w := range fake.Written() {
+		if w.Display == "G0 X9" || strings.HasPrefix(w.Display, "M106") {
+			t.Fatalf("unexpected write: %#v", fake.Written())
+		}
+	}
+}
