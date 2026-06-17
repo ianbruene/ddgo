@@ -47,6 +47,38 @@ Example:
 M101 G54X G55X 0.001
 ```
 
+### `M102` — evaluate an expression and write a WCS axis
+
+```gcode
+M102 <destination-WCS-axis> = <expression>
+```
+
+`M102` evaluates a finite arithmetic expression and writes the result to the explicit destination WCS axis through the runtime WCS writer. The handler does not verify writeback. Expressions support numeric literals, process-local variables, compact WCS-axis references such as `G54Z`, unary `+`/`-`, `+`, `-`, `*`, `/`, and parentheses. WCS offsets are read through `$#` only when the expression references a WCS value.
+
+Examples:
+
+```gcode
+M102 G54Z = (G55Z + G56Z) / 2
+M102 G54X = depth + 0.125
+M102 G55Y = -1.25 * 2
+```
+
+### `M106` — assert a numeric comparison
+
+```gcode
+M106 <left-expression> <op> <right-expression> [ERROR <message>]
+```
+
+`M106` evaluates both operands as finite arithmetic expressions and compares them with one of `<`, `<=`, `>`, `>=`, `==`, or `!=`. Equality uses exact numeric comparison. If the assertion is true, the handler succeeds silently. If false, it fails the program with either the custom `ERROR` message or a generated assertion failure. WCS offsets are read through `$#` only when an operand references a WCS value.
+
+Examples:
+
+```gcode
+M106 G54Z <= G55Z
+M106 G54X == 0
+M106 depth > -1.0 ERROR depth is too shallow
+```
+
 ### `M107` — store a variable
 
 Syntax:
@@ -91,7 +123,7 @@ Registered handlers can use the current runtime to:
 
 ## Current limitations
 
-- Only `M100`, `M101`, `M107`, and `M108` are registered by the default macro engine.
+- Only `M100`, `M101`, `M102`, `M106`, `M107`, and `M108` are registered by the default macro engine.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
 - The probe runtime method currently returns not-available.

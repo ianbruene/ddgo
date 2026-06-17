@@ -13,6 +13,8 @@ func RegisterDefaultHandlers(registry *Registry) {
 	}
 	registry.Register(100, HandlerFunc(handleM100))
 	registry.Register(101, HandlerFunc(handleM101))
+	registry.Register(102, HandlerFunc(handleM102))
+	registry.Register(106, HandlerFunc(handleM106))
 	registry.Register(107, HandlerFunc(handleM107))
 	registry.Register(108, HandlerFunc(handleM108))
 }
@@ -80,6 +82,131 @@ func handleM101(ctx context.Context, runtime Runtime, inv Invocation) error {
 		return fmt.Errorf("WCS comparison failed: %s %s=%.6f %s %s=%.6f tolerance=%.6f", args.First.WCS, args.First.Axis, a, args.Second.WCS, args.Second.Axis, b, args.Tolerance)
 	}
 	return nil
+}
+
+func handleM102(ctx context.Context, runtime Runtime, inv Invocation) error {
+	parts := strings.SplitN(inv.RawArgs, "=", 2)
+	if len(parts) != 2 {
+		if strings.TrimSpace(inv.RawArgs) == "" {
+			return fmt.Errorf("missing destination WCS axis")
+		}
+		return fmt.Errorf("missing expression")
+	}
+	destText := strings.TrimSpace(parts[0])
+	if destText == "" {
+		return fmt.Errorf("missing destination WCS axis")
+	}
+	dest, err := ParseWCSAxisRef(destText)
+	if err != nil {
+		return err
+	}
+	expr := strings.TrimSpace(parts[1])
+	if expr == "" {
+		return fmt.Errorf("missing expression")
+	}
+	evalCtx := EvalContext{Vars: runtime.Variables()}
+	if expressionNeedsWCS(expr) {
+		offsets, err := runtime.ReadWCSOffsets(ctx)
+		if err != nil {
+			return err
+		}
+		evalCtx.Offsets = offsets
+	}
+	value, err := EvalArithmeticExpression(expr, evalCtx)
+	if err != nil {
+		return err
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("non-finite expression result")
+	}
+	return runtime.WriteWCSOffset(ctx, dest.WCS, dest.Axis, value)
+}
+
+func handleM106(ctx context.Context, runtime Runtime, inv Invocation) error {
+	comparison, message := splitM106ErrorClause(inv.RawArgs)
+	left, op, right, err := splitComparison(comparison)
+	if err != nil {
+		return err
+	}
+	evalCtx := EvalContext{Vars: runtime.Variables()}
+	if expressionNeedsWCS(left) || expressionNeedsWCS(right) {
+		offsets, err := runtime.ReadWCSOffsets(ctx)
+		if err != nil {
+			return err
+		}
+		evalCtx.Offsets = offsets
+	}
+	lv, err := EvalOperand(left, evalCtx)
+	if err != nil {
+		return err
+	}
+	rv, err := EvalOperand(right, evalCtx)
+	if err != nil {
+		return err
+	}
+	ok := false
+	switch op {
+	case "<":
+		ok = lv < rv
+	case "<=":
+		ok = lv <= rv
+	case ">":
+		ok = lv > rv
+	case ">=":
+		ok = lv >= rv
+	case "==":
+		ok = lv == rv
+	case "!=":
+		ok = lv != rv
+	default:
+		return fmt.Errorf("unsupported comparison operator %q", op)
+	}
+	if ok {
+		return nil
+	}
+	if strings.TrimSpace(message) != "" {
+		return fmt.Errorf("%s", strings.TrimSpace(message))
+	}
+	return fmt.Errorf("assertion failed: %s=%.6f %s %s=%.6f", strings.TrimSpace(left), lv, op, strings.TrimSpace(right), rv)
+}
+
+func splitM106ErrorClause(args string) (string, string) {
+	fields := strings.Fields(args)
+	for _, f := range fields {
+		if strings.EqualFold(f, "ERROR") {
+			idx := strings.Index(args, f)
+			return strings.TrimSpace(args[:idx]), strings.TrimSpace(args[idx+len(f):])
+		}
+	}
+	return strings.TrimSpace(args), ""
+}
+
+func splitComparison(input string) (string, string, string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", "", fmt.Errorf("missing left operand")
+	}
+	ops := []string{"<=", ">=", "==", "!=", "<", ">"}
+	best := -1
+	bestOp := ""
+	for _, op := range ops {
+		if idx := strings.Index(input, op); idx >= 0 && (best < 0 || idx < best) {
+			best = idx
+			bestOp = op
+		}
+	}
+	if best < 0 {
+		return "", "", "", fmt.Errorf("missing comparison operator")
+	}
+	left := strings.TrimSpace(input[:best])
+	right := strings.TrimSpace(input[best+len(bestOp):])
+	if left == "" {
+		return "", "", "", fmt.Errorf("missing left operand")
+	}
+	if right == "" {
+		return "", "", "", fmt.Errorf("missing right operand")
+	}
+	return left, bestOp, right, nil
 }
 
 func handleM107(ctx context.Context, runtime Runtime, inv Invocation) error {
