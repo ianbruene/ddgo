@@ -53,7 +53,7 @@ M101 G54X G55X 0.001
 M102 <destination-WCS-axis> = <expression>
 ```
 
-`M102` evaluates a finite arithmetic expression and writes the result to the explicit destination WCS axis through the runtime WCS writer. The handler does not verify writeback. Expressions support numeric literals, process-local variables, compact WCS-axis references such as `G54Z`, unary `+`/`-`, `+`, `-`, `*`, `/`, and parentheses. WCS offsets are read through `$#` only when the expression references a WCS value.
+`M102` evaluates a finite arithmetic expression and writes the result to the explicit destination WCS axis through the runtime WCS writer. The handler does not verify writeback. Expressions support numeric literals, process-local variables, compact WCS-axis references such as `G54Z`, unary `+`/`-`, `+`, `-`, `*`, `/`, and parentheses. WCS offsets are read through `$#` only when the expression references a WCS value. Inside M102/M106 expressions, WCS-axis references must use compact form such as `G54Z`; spaced forms such as `G54 Z` and `WCS G54 Z` are not expression syntax.
 
 Examples:
 
