@@ -137,10 +137,15 @@ func (p *exprParser) parseFactor() (float64, error) {
 	}
 	if p.peekRune() == 'G' || p.peekRune() == 'g' {
 		tok := p.scanIdent()
-		if strings.HasPrefix(strings.ToUpper(tok), "G") {
+		if len(tok) == 4 && strings.HasPrefix(strings.ToUpper(tok), "G") {
 			_, err := ParseWCSAxisRef(tok)
 			if err != nil {
 				return 0, err
+			}
+		}
+		if p.ctx.Vars != nil {
+			if v, ok := p.ctx.Vars.Get(tok); ok {
+				return v, nil
 			}
 		}
 		return 0, fmt.Errorf("unknown variable %q", tok)
@@ -205,8 +210,15 @@ func (p *exprParser) scanWCSRef() (WCSAxisRef, bool) {
 	if p.pos+4 > len(p.input) {
 		return WCSAxisRef{}, false
 	}
+	if p.pos > 0 && isIdentPart(rune(p.input[p.pos-1])) {
+		return WCSAxisRef{}, false
+	}
 	rem := p.input[p.pos:]
 	if len(rem) >= 4 && (rem[0] == 'G' || rem[0] == 'g') && rem[1] == '5' && rem[2] >= '4' && rem[2] <= '9' && strings.ContainsRune("XxYyZz", rune(rem[3])) {
+		if len(rem) > 4 && isIdentPart(rune(rem[4])) {
+			return WCSAxisRef{}, false
+		}
+
 		ref, err := ParseWCSAxisRef(rem[:4])
 		if err == nil {
 			p.pos += 4

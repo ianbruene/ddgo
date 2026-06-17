@@ -49,16 +49,34 @@ func TestEvalArithmeticExpressionCompactWCSReference(t *testing.T) {
 	}
 }
 
+func TestEvalArithmeticExpressionVariableWithWCSPrefix(t *testing.T) {
+	vars := NewVariableStore()
+	vars.Set("G54Zed", 7)
+
+	got, err := EvalArithmeticExpression("G54Zed + 1", EvalContext{Vars: vars})
+	if err != nil {
+		t.Fatalf("EvalArithmeticExpression variable with WCS prefix error = %v", err)
+	}
+	if got != 8 {
+		t.Fatalf("EvalArithmeticExpression variable with WCS prefix = %v, want 8", got)
+	}
+}
+
 func TestEvalArithmeticExpressionSpacedWCSReferenceRejected(t *testing.T) {
 	ctx := EvalContext{Offsets: WCSOffsets{"G54": {Z: 1}}, Vars: NewVariableStore()}
-	tests := []string{"G54 Z + 1"}
+	tests := []string{
+		"G54 Z + 1",
+		"WCS G54 Z + 1",
+	}
 	for _, input := range tests {
 		_, err := EvalArithmeticExpression(input, ctx)
 		if err == nil {
 			t.Fatalf("EvalArithmeticExpression(%q) spaced WCS ref error = nil", input)
 		}
-		if !strings.Contains(err.Error(), "missing WCS axis") && !strings.Contains(err.Error(), "unexpected token") {
-			t.Fatalf("EvalArithmeticExpression(%q) error = %v, want missing WCS axis or unexpected token", input, err)
+		if !strings.Contains(err.Error(), "missing WCS axis") &&
+			!strings.Contains(err.Error(), "unexpected token") &&
+			!strings.Contains(err.Error(), "unknown variable") {
+			t.Fatalf("EvalArithmeticExpression(%q) error = %v, want WCS-expression syntax rejection", input, err)
 		}
 	}
 }

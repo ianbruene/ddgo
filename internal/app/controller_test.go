@@ -1971,6 +1971,9 @@ func TestControllerDefaultM102FailurePreventsNextLine(t *testing.T) {
 		if w.Display == "G0 X9" || strings.HasPrefix(w.Display, "M102") {
 			t.Fatalf("unexpected write: %#v", fake.Written())
 		}
+		if w.Display == "$#" {
+			t.Fatalf("unexpected WCS query: %#v", fake.Written())
+		}
 	}
 }
 
@@ -2036,7 +2039,7 @@ func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
 	fake.InjectRX("[G55:0.000,0.000,2.000]")
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool {
-		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "macro M106 failed at line 1") && strings.Contains(s.LastError, "expected G54Z")
+		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "macro M106 failed at line 1") && strings.Contains(s.LastError, "expected G54Z to be below G55Z")
 	})
 	for _, w := range fake.Written() {
 		if w.Display == "G0 X9" || strings.HasPrefix(w.Display, "M106") {
