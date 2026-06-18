@@ -14,7 +14,7 @@ This document summarizes the current code structure for contributors. It describ
 - the optional motion rewriter hook;
 - the process-local variable store;
 - contour state;
-- last-probe placeholder state.
+- last successful probe point state.
 
 The controller coordinates these concerns but keeps lower-level details in focused packages: transport I/O is in `internal/transport`, GRBL command and status helpers are in `internal/grbl`, G-code loading/parsing is in `internal/gcode`, and macro framework types live in `internal/macro`.
 
@@ -63,17 +63,17 @@ Implemented framework pieces include:
 - Typed nil `HandlerFunc` protection.
 - `macro.Error`, which wraps handler errors with source line and code context.
 - `macro.Runtime`, the controller-facing capability interface exposed to handlers.
-- Default handlers for M100, M101, M102, M106, M107, M108, and M109. Command syntax details live in `docs/macros.md`.
+- Default handlers for M100, M101, M102, M106, M107, M108, M109, M110, M111, and M112. Command syntax details live in `docs/macros.md`.
 
 Empty registries and custom macro engines remain available for tests and specialized flows through `SetMacroEngine`.
 
 Currently deferred macro behavior:
 
-- Probe-backed macro behavior is not implemented yet.
-- Contour motion compensation is not implemented yet.
+- Probe runtime support and M109 contour point collection are implemented.
+- Contour surface fitting and motion compensation are deferred.
 
 ## Contour state
 
-`macro.ContourState` currently stores contour points and an enabled/disabled flag. It can reject duplicate X/Y points, and enabling contour mode requires at least three points so a future surface can be defined.
+`macro.ContourState` stores contour points and an enabled/disabled lifecycle flag. It rejects duplicate X/Y points, and enabling contour mode requires at least three points so a future surface can be defined. Clearing contour state removes all collected points and disables contour mode.
 
 Program start disables contour mode without clearing collected points. Program failure also disables contour mode without clearing points. Actual contour surface fitting, motion rewriting, and Z compensation are deferred.

@@ -18,6 +18,9 @@ func RegisterDefaultHandlers(registry *Registry) {
 	registry.Register(107, HandlerFunc(handleM107))
 	registry.Register(108, HandlerFunc(handleM108))
 	registry.Register(109, HandlerFunc(handleM109))
+	registry.Register(110, HandlerFunc(handleM110))
+	registry.Register(111, HandlerFunc(handleM111))
+	registry.Register(112, HandlerFunc(handleM112))
 }
 
 func NewDefaultRegistry() *Registry { r := NewRegistry(); RegisterDefaultHandlers(r); return r }
@@ -286,6 +289,41 @@ func handleM109(ctx context.Context, runtime Runtime, inv Invocation) error {
 		return fmt.Errorf("contour state is not available")
 	}
 	return contour.AddPoint(point)
+}
+
+func handleM110(_ context.Context, runtime Runtime, inv Invocation) error {
+	if strings.TrimSpace(inv.CleanArgs) != "" {
+		return fmt.Errorf("unexpected arguments")
+	}
+	contour := runtime.Contour()
+	if contour == nil {
+		return fmt.Errorf("contour state is not available")
+	}
+	return contour.Enable()
+}
+
+func handleM111(_ context.Context, runtime Runtime, inv Invocation) error {
+	if strings.TrimSpace(inv.CleanArgs) != "" {
+		return fmt.Errorf("unexpected arguments")
+	}
+	contour := runtime.Contour()
+	if contour == nil {
+		return fmt.Errorf("contour state is not available")
+	}
+	contour.Disable()
+	return nil
+}
+
+func handleM112(_ context.Context, runtime Runtime, inv Invocation) error {
+	if strings.TrimSpace(inv.CleanArgs) != "" {
+		return fmt.Errorf("unexpected arguments")
+	}
+	contour := runtime.Contour()
+	if contour == nil {
+		return fmt.Errorf("contour state is not available")
+	}
+	contour.Clear()
+	return nil
 }
 
 func splitNameAndRemainder(args string) (string, string, error) {

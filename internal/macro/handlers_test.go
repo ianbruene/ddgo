@@ -32,6 +32,15 @@ func TestDefaultRegistration(t *testing.T) {
 	if _, ok := NewRegistry().Handler(109); ok {
 		t.Fatal("NewRegistry registered M109")
 	}
+	if _, ok := NewRegistry().Handler(112); ok {
+		t.Fatal("NewRegistry registered M112")
+	}
+	if _, ok := NewRegistry().Handler(111); ok {
+		t.Fatal("NewRegistry registered M111")
+	}
+	if _, ok := NewRegistry().Handler(110); ok {
+		t.Fatal("NewRegistry registered M110")
+	}
 	reg := NewDefaultRegistry()
 	if _, ok := reg.Handler(100); !ok {
 		t.Fatal("M100 not registered")
@@ -53,6 +62,15 @@ func TestDefaultRegistration(t *testing.T) {
 	}
 	if _, ok := reg.Handler(109); !ok {
 		t.Fatal("M109 not registered")
+	}
+	if _, ok := reg.Handler(112); !ok {
+		t.Fatal("M112 not registered")
+	}
+	if _, ok := reg.Handler(111); !ok {
+		t.Fatal("M111 not registered")
+	}
+	if _, ok := reg.Handler(110); !ok {
+		t.Fatal("M110 not registered")
 	}
 	rt := &fakeRuntime{}
 	handled, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Number: 1, Raw: "M107 depth 1.5", Text: "M107 depth 1.5"})
@@ -449,5 +467,124 @@ func TestM109Errors(t *testing.T) {
 				t.Fatalf("RunProbe calls = %d, want %d", len(tt.rt.probeArgs), tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestM110EnableContour(t *testing.T) {
+	contour := NewContourState()
+	for _, p := range []Point{{X: 1, Y: 1, Z: -1}, {X: 2, Y: 1, Z: -2}, {X: 3, Y: 1, Z: -3}} {
+		if err := contour.AddPoint(p); err != nil {
+			t.Fatalf("AddPoint() error = %v", err)
+		}
+	}
+	rt := &fakeRuntime{contour: contour}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M110", Text: "M110"})
+	if err != nil {
+		t.Fatalf("Dispatch(M110) error = %v", err)
+	}
+	if !contour.Enabled() {
+		t.Fatal("contour enabled = false, want true")
+	}
+}
+
+func TestM110Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		rt   *fakeRuntime
+		want string
+	}{
+		{"too few points", "M110", &fakeRuntime{contour: NewContourState()}, "at least 3 contour points"},
+		{"nil contour", "M110", &fakeRuntime{}, "contour state is not available"},
+		{"unexpected args", "M110 unexpected", &fakeRuntime{contour: NewContourState()}, "unexpected arguments"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewDefaultEngine().Dispatch(context.Background(), tt.rt, gcode.Line{Raw: tt.line, Text: tt.line})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Dispatch(%q) error = %v, want %q", tt.line, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestM111DisableContour(t *testing.T) {
+	contour := NewContourState()
+	for _, p := range []Point{{X: 1, Y: 1, Z: -1}, {X: 2, Y: 1, Z: -2}, {X: 3, Y: 1, Z: -3}} {
+		if err := contour.AddPoint(p); err != nil {
+			t.Fatalf("AddPoint() error = %v", err)
+		}
+	}
+	if err := contour.Enable(); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
+	rt := &fakeRuntime{contour: contour}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M111", Text: "M111"})
+	if err != nil {
+		t.Fatalf("Dispatch(M111) error = %v", err)
+	}
+	if contour.Enabled() {
+		t.Fatal("contour enabled = true, want false")
+	}
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M111", Text: "M111"})
+	if err != nil {
+		t.Fatalf("second Dispatch(M111) error = %v", err)
+	}
+}
+
+func TestM111Errors(t *testing.T) {
+	for _, tt := range []struct {
+		line, want string
+		rt         *fakeRuntime
+	}{
+		{"M111", "contour state is not available", &fakeRuntime{}},
+		{"M111 unexpected", "unexpected arguments", &fakeRuntime{contour: NewContourState()}},
+	} {
+		_, err := NewDefaultEngine().Dispatch(context.Background(), tt.rt, gcode.Line{Raw: tt.line, Text: tt.line})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("Dispatch(%q) error = %v, want %q", tt.line, err, tt.want)
+		}
+	}
+}
+
+func TestM112ClearContour(t *testing.T) {
+	contour := NewContourState()
+	for _, p := range []Point{{X: 1, Y: 1, Z: -1}, {X: 2, Y: 1, Z: -2}, {X: 3, Y: 1, Z: -3}} {
+		if err := contour.AddPoint(p); err != nil {
+			t.Fatalf("AddPoint() error = %v", err)
+		}
+	}
+	if err := contour.Enable(); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
+	rt := &fakeRuntime{contour: contour}
+	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M112", Text: "M112"})
+	if err != nil {
+		t.Fatalf("Dispatch(M112) error = %v", err)
+	}
+	if got := contour.Points(); len(got) != 0 {
+		t.Fatalf("Points() = %#v, want empty", got)
+	}
+	if contour.Enabled() {
+		t.Fatal("contour enabled = true, want false")
+	}
+	_, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M112", Text: "M112"})
+	if err != nil {
+		t.Fatalf("empty Dispatch(M112) error = %v", err)
+	}
+}
+
+func TestM112Errors(t *testing.T) {
+	for _, tt := range []struct {
+		line, want string
+		rt         *fakeRuntime
+	}{
+		{"M112", "contour state is not available", &fakeRuntime{}},
+		{"M112 unexpected", "unexpected arguments", &fakeRuntime{contour: NewContourState()}},
+	} {
+		_, err := NewDefaultEngine().Dispatch(context.Background(), tt.rt, gcode.Line{Raw: tt.line, Text: tt.line})
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("Dispatch(%q) error = %v, want %q", tt.line, err, tt.want)
+		}
 	}
 }
