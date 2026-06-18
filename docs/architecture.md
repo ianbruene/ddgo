@@ -67,10 +67,12 @@ Implemented framework pieces include:
 
 Empty registries and custom macro engines remain available for tests and specialized flows through `SetMacroEngine`.
 
+Current macro behavior includes probe runtime support, M109 contour point collection, and M110/M111/M112 contour lifecycle control.
+
 Currently deferred macro behavior:
 
-- Probe runtime support and M109 contour point collection are implemented.
-- Contour surface fitting and motion compensation are deferred.
+- Contour surface fitting is not implemented yet.
+- Contour motion rewriting / Z compensation is not implemented yet.
 
 ## Contour state
 
