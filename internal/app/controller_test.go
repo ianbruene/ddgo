@@ -2326,3 +2326,99 @@ func TestControllerDefaultM109MissingCommandFailsBeforeWrite(t *testing.T) {
 	}
 	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
 }
+
+func TestControllerDefaultM110EnablesAfterThreeM109Points(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m110-enable.gcode", "M109 G38.2 Z-5 F100\nM109 G38.2 Z-5 F100\nM109 G38.2 Z-5 F100\nM110\n")
+	points := []string{"[PRB:1.000,2.000,-3.500:1]", "[PRB:2.000,2.000,-3.250:1]", "[PRB:3.000,2.000,-3.000:1]"}
+	for i, point := range points {
+		waitForWrites(t, fake, i+1)
+		if got, want := fake.Written()[i].Display, "G38.2 Z-5 F100"; got != want {
+			t.Fatalf("write %d = %q, want %q", i, got, want)
+		}
+		fake.InjectRX(point)
+		fake.InjectRX("ok")
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+	ensureWritesStayAt(t, fake, 3, 100*time.Millisecond)
+	if !controller.Contour().Enabled() {
+		t.Fatal("Contour().Enabled() = false, want true")
+	}
+	if got := controller.Contour().Points(); len(got) != 3 {
+		t.Fatalf("Contour().Points() length = %d, want 3 (%#v)", len(got), got)
+	}
+}
+
+func TestControllerDefaultM110FailsWithTooFewPoints(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m110-too-few.gcode", "M109 G38.2 Z-5 F100\nM110\nG0 X9\n")
+	waitForWrites(t, fake, 1)
+	fake.InjectRX("[PRB:1.000,2.000,-3.500:1]")
+	fake.InjectRX("ok")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M110 failed at line 2") || !strings.Contains(state.LastError, "at least 3 contour points") {
+		t.Fatalf("LastError = %q, want M110 too-few-points macro failure", state.LastError)
+	}
+	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
+}
+
+func setupLoadedDefaultMacroProgram(t *testing.T, name, program string) (*Controller, *transport.FakeTransport) {
+	t.Helper()
+	path := writeProgramFile(t, name, program)
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	return controller, fake
+}
+
+func TestControllerDefaultM111DisablesContourMode(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupLoadedDefaultMacroProgram(t, "default-m111-disable.gcode", "M111\n")
+	wantPoints := enableTestContour(t, controller)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
+	if controller.Contour().Enabled() {
+		t.Fatal("Contour().Enabled() = true, want false")
+	}
+	if got := controller.Contour().Points(); !reflect.DeepEqual(got, wantPoints) {
+		t.Fatalf("Contour().Points() = %#v, want %#v", got, wantPoints)
+	}
+}
+
+func TestControllerDefaultM112ClearsContourState(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupLoadedDefaultMacroProgram(t, "default-m112-clear.gcode", "M112\n")
+	_ = enableTestContour(t, controller)
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
+	if controller.Contour().Enabled() {
+		t.Fatal("Contour().Enabled() = true, want false")
+	}
+	if got := controller.Contour().Points(); len(got) != 0 {
+		t.Fatalf("Contour().Points() = %#v, want empty", got)
+	}
+}
+
+func TestControllerDefaultM110ExtraArgsFailBeforeWrite(t *testing.T) {
+	t.Parallel()
+	controller, fake := setupDefaultMacroProgram(t, "default-m110-extra.gcode", "M110 unexpected\n")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "macro M110 failed at line 1") || !strings.Contains(state.LastError, "unexpected arguments") {
+		t.Fatalf("LastError = %q, want unexpected-arguments macro failure", state.LastError)
+	}
+	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
+}

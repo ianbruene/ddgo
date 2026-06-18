@@ -122,6 +122,30 @@ M109 <probe-command>
 
 `M109` only collects contour points. It does not enable contour compensation, fit a surface, rewrite motion, or apply Z compensation. Failed probes, no-contact probe results, missing probe results, controller errors, alarms, and missing probe commands fail the macro and do not add a contour point.
 
+### `M110` — enable contour mode
+
+```gcode
+M110
+```
+
+Enables contour mode after at least three contour points have been collected. This only sets the contour lifecycle flag for future compensation behavior. It does not fit a surface or rewrite motion yet.
+
+### `M111` — disable contour mode
+
+```gcode
+M111
+```
+
+Disables contour mode without clearing collected contour points. Disabling contour mode is idempotent.
+
+### `M112` — clear contour data
+
+```gcode
+M112
+```
+
+Clears collected contour points and disables contour mode.
+
 Example:
 
 ```gcode
@@ -139,16 +163,17 @@ Registered handlers can use the current runtime to:
 - read current machine and work positions from parsed status reports;
 - run probe commands during an active program and read the last successful probe point;
 - access process-local variables;
-- access contour state and add contour points.
+- access contour state, add contour points, and control the contour lifecycle.
 
 ## Current limitations
 
-- Only `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, and `M109` are registered by the default macro engine.
+- `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M110`, `M111`, and `M112` are registered by the default macro engine.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
 - Contour surface fitting is not implemented yet.
-- Contour motion rewriting is not implemented yet.
+- Contour motion rewriting is not implemented yet. Enabling contour mode does not affect G-code motion until surface fitting and rewriting are implemented.
 
 ## Planned macro implementation order
 
-1. Contour surface fitting and motion rewriting.
+1. Contour surface fitting.
+2. Contour motion rewriting / Z compensation.
