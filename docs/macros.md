@@ -122,6 +122,12 @@ M109 <probe-command>
 
 `M109` only collects contour points. It does not enable contour compensation, fit a surface, rewrite motion, or apply Z compensation. Failed probes, no-contact probe results, missing probe results, controller errors, alarms, and missing probe commands fail the macro and do not add a contour point.
 
+Example:
+
+```gcode
+M109 G38.2 Z-5 F100
+```
+
 ### `M110` — enable contour mode
 
 ```gcode
@@ -145,12 +151,6 @@ M112
 ```
 
 Clears collected contour points and disables contour mode.
-
-Example:
-
-```gcode
-M109 G38.2 Z-5 F100
-```
 
 ## Runtime capabilities currently available
 
