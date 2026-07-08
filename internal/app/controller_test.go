@@ -2422,3 +2422,182 @@ func TestControllerDefaultM110ExtraArgsFailBeforeWrite(t *testing.T) {
 	}
 	ensureWritesStayAt(t, fake, 0, 100*time.Millisecond)
 }
+
+func TestControllerAutomaticStatusPollSuppressesTXAndRXButUpdatesState(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.writeStatusPoll(context.Background()); err != nil {
+		t.Fatalf("writeStatusPoll() error = %v", err)
+	}
+	written := fake.Written()
+	if got, want := len(written), 1; got != want {
+		t.Fatalf("len(written) = %d, want %d", got, want)
+	}
+	if got, want := string(written[0].Payload), "?"; got != want {
+		t.Fatalf("written[0].Payload = %q, want %q", got, want)
+	}
+	if !written[0].SuppressLog {
+		t.Fatal("automatic status poll SuppressLog = false, want true")
+	}
+	assertNoEventKind(t, controller.Events(), EventConsoleTX)
+
+	fake.InjectRX("<Idle|MPos:1.000,2.000,3.000|WPos:4.000,5.000,6.000|FS:7,8>")
+	assertNoEventKind(t, controller.Events(), EventConsoleRX)
+
+	state := controller.Snapshot()
+	if got, want := state.MachineState, "Idle"; got != want {
+		t.Fatalf("MachineState = %q, want %q", got, want)
+	}
+	if !state.HasMachinePosition || state.MachinePosition != [3]float64{1, 2, 3} {
+		t.Fatalf("MachinePosition = %#v (has %v), want [1 2 3]", state.MachinePosition, state.HasMachinePosition)
+	}
+	if !state.HasWorkPosition || state.WorkPosition != [3]float64{4, 5, 6} {
+		t.Fatalf("WorkPosition = %#v (has %v), want [4 5 6]", state.WorkPosition, state.HasWorkPosition)
+	}
+	if !state.HasFeedSpindle || state.Feed != 7 || state.Spindle != 8 {
+		t.Fatalf("Feed/Spindle = %v/%v (has %v), want 7/8", state.Feed, state.Spindle, state.HasFeedSpindle)
+	}
+	if got, want := state.LastStatusRaw, "<Idle|MPos:1.000,2.000,3.000|WPos:4.000,5.000,6.000|FS:7,8>"; got != want {
+		t.Fatalf("LastStatusRaw = %q, want %q", got, want)
+	}
+}
+
+func TestControllerManualStatusLogsTXAndRX(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.Action(context.Background(), grbl.ActionStatus); err != nil {
+		t.Fatalf("Action(status) error = %v", err)
+	}
+	tx := waitForEvent(t, controller.Events(), EventConsoleTX)
+	if got, want := tx.Text, "?"; got != want {
+		t.Fatalf("tx.Text = %q, want %q", got, want)
+	}
+	if tx.Raw.SuppressLog {
+		t.Fatal("manual status TX SuppressLog = true, want false")
+	}
+
+	fake.InjectRX("<Run|MPos:9.000,8.000,7.000>")
+	rx := waitForEvent(t, controller.Events(), EventConsoleRX)
+	if got, want := rx.Text, "<Run|MPos:9.000,8.000,7.000>"; got != want {
+		t.Fatalf("rx.Text = %q, want %q", got, want)
+	}
+}
+
+func TestControllerConsoleCommandsAndNonStatusRXRemainLoggable(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.writeStatusPoll(context.Background()); err != nil {
+		t.Fatalf("writeStatusPoll() error = %v", err)
+	}
+	assertNoEventKind(t, controller.Events(), EventConsoleTX)
+
+	if err := controller.SendConsoleLine(context.Background(), "G0 X1"); err != nil {
+		t.Fatalf("SendConsoleLine() error = %v", err)
+	}
+	tx := waitForEvent(t, controller.Events(), EventConsoleTX)
+	if got, want := tx.Text, "G0 X1"; got != want {
+		t.Fatalf("tx.Text = %q, want %q", got, want)
+	}
+
+	fake.InjectRX("ok")
+	rx := waitForEvent(t, controller.Events(), EventConsoleRX)
+	if got, want := rx.Text, "ok"; got != want {
+		t.Fatalf("rx.Text = %q, want %q", got, want)
+	}
+}
+
+func TestControllerManualStatusClearsPendingAutomaticSuppression(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.writeStatusPoll(context.Background()); err != nil {
+		t.Fatalf("writeStatusPoll() error = %v", err)
+	}
+	assertNoEventKind(t, controller.Events(), EventConsoleTX)
+
+	if err := controller.Action(context.Background(), grbl.ActionStatus); err != nil {
+		t.Fatalf("Action(status) error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventConsoleTX)
+
+	fake.InjectRX("<Idle|MPos:0.000,0.000,0.000>")
+	rx := waitForEvent(t, controller.Events(), EventConsoleRX)
+	if got, want := rx.Text, "<Idle|MPos:0.000,0.000,0.000>"; got != want {
+		t.Fatalf("rx.Text = %q, want %q", got, want)
+	}
+}
+
+func TestControllerConsoleStatusClearsPendingAutomaticSuppression(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = 10 * time.Second
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	if err := controller.writeStatusPoll(context.Background()); err != nil {
+		t.Fatalf("writeStatusPoll() error = %v", err)
+	}
+	assertNoEventKind(t, controller.Events(), EventConsoleTX)
+
+	if err := controller.SendConsoleLine(context.Background(), "?"); err != nil {
+		t.Fatalf("SendConsoleLine(?) error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventConsoleTX)
+
+	fake.InjectRX("<Idle|WPos:1.000,1.000,1.000>")
+	rx := waitForEvent(t, controller.Events(), EventConsoleRX)
+	if got, want := rx.Text, "<Idle|WPos:1.000,1.000,1.000>"; got != want {
+		t.Fatalf("rx.Text = %q, want %q", got, want)
+	}
+}
+
+func assertNoEventKind(t *testing.T, ch <-chan Event, kind EventKind) {
+	t.Helper()
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Kind == kind {
+				t.Fatalf("received unexpected event kind %q: %#v", kind, ev)
+			}
+		case <-timer.C:
+			return
+		}
+	}
+}

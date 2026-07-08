@@ -20,8 +20,9 @@ func DefaultPortConfig(name string) PortConfig {
 }
 
 type Message struct {
-	Payload []byte
-	Display string
+	Payload     []byte
+	Display     string
+	SuppressLog bool
 }
 
 func NewLineMessage(line string) Message {
@@ -49,11 +50,12 @@ const (
 )
 
 type Event struct {
-	Kind    EventKind
-	When    time.Time
-	Text    string
-	Err     error
-	Payload []byte
+	Kind        EventKind
+	When        time.Time
+	Text        string
+	Err         error
+	Payload     []byte
+	SuppressLog bool
 }
 
 type Transport interface {

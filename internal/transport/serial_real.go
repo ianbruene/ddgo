@@ -79,6 +79,8 @@ func (t *SerialTransport) Close() error {
 }
 
 func (t *SerialTransport) Write(ctx context.Context, msg Message) error {
+	display := msg.Display
+	suppressLog := msg.SuppressLog
 	t.mu.Lock()
 	port := t.port
 	t.mu.Unlock()
@@ -98,7 +100,7 @@ func (t *SerialTransport) Write(ctx context.Context, msg Message) error {
 		}
 		msg.Payload = msg.Payload[n:]
 	}
-	t.events <- Event{Kind: EventTX, When: time.Now(), Text: msg.Display}
+	t.events <- Event{Kind: EventTX, When: time.Now(), Text: display, SuppressLog: suppressLog}
 	return nil
 }
 

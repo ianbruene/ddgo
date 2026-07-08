@@ -62,7 +62,7 @@ func (f *FakeTransport) Write(_ context.Context, msg Message) error {
 	copied := msg
 	copied.Payload = append([]byte(nil), msg.Payload...)
 	f.writes = append(f.writes, copied)
-	f.events <- Event{Kind: EventTX, When: time.Now(), Text: msg.Display, Payload: append([]byte(nil), msg.Payload...)}
+	f.events <- Event{Kind: EventTX, When: time.Now(), Text: msg.Display, Payload: append([]byte(nil), msg.Payload...), SuppressLog: msg.SuppressLog}
 	return nil
 }
 
