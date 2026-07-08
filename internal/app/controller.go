@@ -28,22 +28,23 @@ type programRun struct {
 }
 
 type Controller struct {
-	mu                 sync.RWMutex
-	transport          transport.Transport
-	listPorts          ports.ListFunc
-	events             chan Event
-	state              State
-	loaded             gcode.Program
-	run                *programRun
-	statusPollCancel   context.CancelFunc
-	statusPollDone     chan struct{}
-	statusPollInterval time.Duration
-	macroEngine        *macro.Engine
-	motionRewriter     macro.MotionRewriter
-	variables          *macro.VariableStore
-	contour            *macro.ContourState
-	lastProbe          macro.Point
-	hasLastProbe       bool
+	mu                        sync.RWMutex
+	transport                 transport.Transport
+	listPorts                 ports.ListFunc
+	events                    chan Event
+	state                     State
+	loaded                    gcode.Program
+	run                       *programRun
+	statusPollCancel          context.CancelFunc
+	statusPollDone            chan struct{}
+	statusPollInterval        time.Duration
+	macroEngine               *macro.Engine
+	motionRewriter            macro.MotionRewriter
+	variables                 *macro.VariableStore
+	contour                   *macro.ContourState
+	lastProbe                 macro.Point
+	hasLastProbe              bool
+	pendingQuietStatusReports int
 }
 
 func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller {
@@ -151,6 +152,9 @@ func (c *Controller) Disconnect() error {
 }
 
 func (c *Controller) SendConsoleLine(ctx context.Context, line string) error {
+	if strings.TrimSpace(line) == "?" {
+		c.clearPendingQuietStatusReports()
+	}
 	if c.Snapshot().ProgramStatus.IsActive() {
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
@@ -269,6 +273,7 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	msg.SuppressLog = true
 	if err := c.transport.Write(ctx, msg); err != nil {
 		if errors.Is(err, transport.ErrNotOpen) {
 			return nil
@@ -276,6 +281,9 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 		c.emitError(err)
 		return err
 	}
+	c.mu.Lock()
+	c.pendingQuietStatusReports = 1
+	c.mu.Unlock()
 	return nil
 }
 
@@ -283,6 +291,9 @@ func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
 	if c.Snapshot().ProgramStatus.IsActive() {
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
+	}
+	if action == grbl.ActionStatus {
+		c.clearPendingQuietStatusReports()
 	}
 	msg, err := grbl.BuildAction(action)
 	if err != nil {
@@ -722,6 +733,12 @@ func (c *Controller) Variables() *macro.VariableStore { return c.variables }
 
 func (c *Controller) Contour() *macro.ContourState { return c.contour }
 
+func (c *Controller) clearPendingQuietStatusReports() {
+	c.mu.Lock()
+	c.pendingQuietStatusReports = 0
+	c.mu.Unlock()
+}
+
 func (c *Controller) writeProgramAction(ctx context.Context, action grbl.Action) error {
 	msg, err := grbl.BuildAction(action)
 	if err != nil {
@@ -742,10 +759,17 @@ func (c *Controller) runTransportEventBridge() {
 		case transport.EventConnected, transport.EventDisconnected:
 			continue
 		case transport.EventTX:
-			c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
+			if !ev.SuppressLog {
+				c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
+			}
 		case transport.EventRX:
 			c.mu.Lock()
+			suppressRXLog := false
 			if report, ok := grbl.ParseStatusReport(ev.Text); ok {
+				if c.pendingQuietStatusReports > 0 {
+					c.pendingQuietStatusReports--
+					suppressRXLog = true
+				}
 				c.state.MachineState = report.State
 				c.state.LastStatusRaw = report.Raw
 				if report.HasMPos {
@@ -768,7 +792,9 @@ func (c *Controller) runTransportEventBridge() {
 			if overflowRun != nil {
 				c.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
 			}
-			c.events <- Event{Kind: EventConsoleRX, When: ev.When, Text: ev.Text, State: state, Raw: ev}
+			if !suppressRXLog {
+				c.events <- Event{Kind: EventConsoleRX, When: ev.When, Text: ev.Text, State: state, Raw: ev}
+			}
 		case transport.EventError:
 			c.emitError(ev.Err)
 		}
