@@ -122,14 +122,14 @@ func ParseStatusReport(line string) (StatusReport, bool) {
 			continue
 		}
 		switch strings.TrimSpace(key) {
-		case "MPos":
+		case "MPos", "M":
 			coords, ok := parseCoordTriple(value)
 			if !ok {
 				return StatusReport{}, false
 			}
 			report.MPos = coords
 			report.HasMPos = true
-		case "WPos":
+		case "WPos", "W":
 			coords, ok := parseCoordTriple(value)
 			if !ok {
 				return StatusReport{}, false
