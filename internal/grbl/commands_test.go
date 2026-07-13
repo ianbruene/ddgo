@@ -216,3 +216,20 @@ func TestParseGrblDDStatusReport(t *testing.T) {
 		t.Fatalf("GrblDD M: parse failed: %+v ok=%v", report, ok)
 	}
 }
+
+func TestParseGrblDDWorkCoordinateOffset(t *testing.T) {
+	report, ok := ParseStatusReport("<Idle|M:1,2,3|B:15,128|L:0|0000>")
+	if !ok || !report.HasMPos || report.MPos != [3]float64{1, 2, 3} || report.HasWPos || report.HasWCO {
+		t.Fatalf("GrblDD M parse failed: %+v ok=%v", report, ok)
+	}
+
+	report, ok = ParseStatusReport("<Idle|W:1,2,3|B:15,128|L:0|0000>")
+	if !ok || !report.HasWPos || report.WPos != [3]float64{1, 2, 3} || report.HasWCO {
+		t.Fatalf("primary W parse failed: %+v ok=%v", report, ok)
+	}
+
+	report, ok = ParseStatusReport("<Idle|M:1,2,3|B:15,128|L:0|0000|W:4,5,6>")
+	if !ok || !report.HasMPos || report.MPos != [3]float64{1, 2, 3} || !report.HasWCO || report.WCO != [3]float64{4, 5, 6} || report.HasWPos {
+		t.Fatalf("WCO parse failed: %+v ok=%v", report, ok)
+	}
+}

@@ -17,6 +17,8 @@ type StatusReport struct {
 	HasMPos bool
 	WPos    [3]float64
 	HasWPos bool
+	WCO     [3]float64
+	HasWCO  bool
 	Feed    float64
 	Spindle float64
 	HasFS   bool
@@ -116,6 +118,7 @@ func ParseStatusReport(line string) (StatusReport, bool) {
 	if report.State == "" {
 		return StatusReport{}, false
 	}
+	seenPrimaryPosition := false
 	for _, part := range parts[1:] {
 		key, value, ok := strings.Cut(part, ":")
 		if !ok {
@@ -129,13 +132,28 @@ func ParseStatusReport(line string) (StatusReport, bool) {
 			}
 			report.MPos = coords
 			report.HasMPos = true
-		case "WPos", "W":
+			seenPrimaryPosition = true
+		case "WPos":
 			coords, ok := parseCoordTriple(value)
 			if !ok {
 				return StatusReport{}, false
 			}
 			report.WPos = coords
 			report.HasWPos = true
+			seenPrimaryPosition = true
+		case "W":
+			coords, ok := parseCoordTriple(value)
+			if !ok {
+				return StatusReport{}, false
+			}
+			if seenPrimaryPosition {
+				report.WCO = coords
+				report.HasWCO = true
+			} else {
+				report.WPos = coords
+				report.HasWPos = true
+				seenPrimaryPosition = true
+			}
 		case "FS":
 			feed, spindle, ok := parseFeedSpindle(value)
 			if !ok {

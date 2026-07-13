@@ -54,8 +54,12 @@ func TestEndpointNaturalCompleteAndLimit(t *testing.T) {
 		t.Fatal(st)
 	}
 	out := joined(c.ProcessBytes([]byte("$J=G53 G90 X-86.501 F100\n")))
-	if !strings.Contains(out, "[MSG:Soft Lim]\r\nALARM:2") {
+	if !strings.Contains(out, "[MSG:jogLIM]\r\nerror:") {
 		t.Fatal(out)
+	}
+	snap := c.Snapshot()
+	if snap.State != StateIdle || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 {
+		t.Fatalf("unexpected limit snapshot: %+v", snap)
 	}
 }
 func TestRealtimeBypassesQueueResetB(t *testing.T) {
@@ -80,11 +84,130 @@ func TestRealtimeBypassesQueueResetB(t *testing.T) {
 func TestMalformedAndHardLimit(t *testing.T) {
 	c, _ := testCtl()
 	out := joined(c.ProcessBytes([]byte("G2 X1\n")))
-	if !strings.Contains(out, "G2X1\r\n[MSG:Unsupported]\r\nerror:20") {
+	if !strings.Contains(out, "[echo: G2X1]\r\n[MSG:Unsupported]\r\nerror:20") {
 		t.Fatal(out)
 	}
 	out = joined(c.HardLimit("X"))
 	if out != "[MSG:Limit X]\r\nALARM:1\r\n" {
 		t.Fatal(out)
 	}
+}
+
+func TestReconcileConsumesElapsedAcrossQueuedMoves(t *testing.T) {
+	c, clk := testCtl()
+	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
+	c.ProcessBytes([]byte("$J=G53 G90 Y-10 F60\n"))
+	c.ProcessBytes([]byte("$J=G53 G90 Z-10 F60\n"))
+
+	clk.Advance(50 * time.Second)
+	st := joined(c.ProcessBytes([]byte("?")))
+	if !strings.Contains(st, "<Idle|M:0.000,0.000,-10.000|") {
+		t.Fatal(st)
+	}
+	snap := c.Snapshot()
+	if snap.State != StateIdle || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 {
+		t.Fatalf("unexpected snapshot after reconciliation: %+v", snap)
+	}
+	if snap.MachinePosition != [3]float64{0, 0, -10} {
+		t.Fatalf("position = %v", snap.MachinePosition)
+	}
+}
+
+func TestReconcileCarriesPartialElapsedIntoNextMove(t *testing.T) {
+	c, clk := testCtl()
+	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
+	c.ProcessBytes([]byte("$J=G53 G90 Y-10 F60\n"))
+
+	clk.Advance(15 * time.Second)
+	snap := c.Snapshot()
+	if snap.State != StateJog || snap.ActiveMove == nil || snap.QueuedCommandCount != 0 {
+		t.Fatalf("unexpected snapshot: %+v", snap)
+	}
+	if got := snap.MachinePosition; got[0] != -5 || got[1] <= -6 || got[1] >= -4 || got[2] != 0 {
+		t.Fatalf("position = %v, want midway through second move", got)
+	}
+}
+
+func TestPlannerCapacityCountsActiveMove(t *testing.T) {
+	fw := DefaultFirmwareProfile()
+	mach := DefaultMachineProfile()
+	mach.PlannerQueueCapacity = 2
+	clk := &ManualClock{T: time.Unix(0, 0)}
+	c := NewController(fw, mach, clk)
+
+	if got := joined(c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	if got := joined(c.ProcessBytes([]byte("$J=G53 G90 Y-10 F60\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	out := joined(c.ProcessBytes([]byte("$J=G53 G90 Z-10 F60\n")))
+	if !strings.Contains(out, "[MSG:Queue full]\r\nerror:24") {
+		t.Fatal(out)
+	}
+	snap := c.Snapshot()
+	if snap.FreePlannerBlocks != 0 || snap.QueuedCommandCount != 1 || snap.ActiveMove == nil {
+		t.Fatalf("unexpected snapshot: %+v", snap)
+	}
+	if st := joined(c.ProcessBytes([]byte("?"))); !strings.Contains(st, "|B:0,") {
+		t.Fatal(st)
+	}
+}
+
+func TestUnknownExtendedRealtimeByteIsDiscarded(t *testing.T) {
+	c, _ := testCtl()
+	if out := joined(c.ProcessBytes([]byte{0x90})); out != "" {
+		t.Fatalf("unknown realtime emitted response %q", out)
+	}
+	if got := joined(c.ProcessBytes([]byte("$X\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	if snap := c.Snapshot(); snap.LastCommand != "$X" {
+		t.Fatalf("last command = %q", snap.LastCommand)
+	}
+	found := false
+	for _, e := range c.Events() {
+		if e.Kind == "realtime_ignored" && e.Text == "0x90" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing ignored realtime event: %+v", c.Events())
+	}
+}
+
+func TestRealtimeCommandsAreLogged(t *testing.T) {
+	c, _ := testCtl()
+	c.ProcessBytes([]byte("?"))
+	c.ProcessBytes([]byte{0x85})
+
+	commands := c.Commands()
+	if !hasLog(commands, "command", "?") || !hasLog(commands, "command", "Jog Cancel") {
+		t.Fatalf("missing realtime commands: %+v", commands)
+	}
+	if !hasLog(c.Events(), "realtime", "?") || !hasLog(c.Events(), "realtime", "Jog Cancel") {
+		t.Fatalf("missing realtime events: %+v", c.Events())
+	}
+}
+
+func TestResetResponsesAreLoggedAsSeparateLines(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte{0x18}))
+	want := "[MSG:reset]\r\nALARM:3\r\n\r\nGrbl 1.1g [help:'$']\r\n"
+	if out != want {
+		t.Fatalf("reset serial output = %q, want %q", out, want)
+	}
+	responses := c.Responses()
+	if !hasLog(responses, "response", "[MSG:reset]") || !hasLog(responses, "response", "ALARM:3") || !hasLog(responses, "response", "Grbl 1.1g [help:'$']") {
+		t.Fatalf("responses not split: %+v", responses)
+	}
+}
+
+func hasLog(entries []LogEntry, kind, text string) bool {
+	for _, e := range entries {
+		if e.Kind == kind && e.Text == text {
+			return true
+		}
+	}
+	return false
 }
