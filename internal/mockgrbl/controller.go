@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"time"
 )
 
 type queuedMove struct {
@@ -31,6 +32,12 @@ type Controller struct {
 func NewController(fw FirmwareProfile, mach MachineProfile, clock Clock) *Controller {
 	if fw.Name == "" {
 		fw = DefaultFirmwareProfile()
+	}
+	if fw.JogLimitMessage == "" {
+		fw.JogLimitMessage = "jogLIM"
+	}
+	if fw.JogLimitErrorCode == 0 {
+		fw.JogLimitErrorCode = 15
 	}
 	if mach.Name == "" {
 		mach = DefaultMachineProfile()
@@ -64,8 +71,21 @@ func (c *Controller) log(kind, text string) {
 }
 func (c *Controller) emit(s string) []string {
 	c.lastResp = strings.TrimSpace(s)
-	c.log("response", c.lastResp)
+	c.logResponseLines(s)
 	return []string{s}
+}
+func (c *Controller) logResponseLines(s string) {
+	for _, line := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			c.log("response", line)
+		}
+	}
+}
+func (c *Controller) logRealtimeCommand(name string) {
+	c.lastCmd = name
+	c.log("command", name)
+	c.log("realtime", name)
 }
 func (c *Controller) ProcessBytes(bs []byte) []string {
 	c.mu.Lock()
@@ -75,27 +95,40 @@ func (c *Controller) ProcessBytes(bs []byte) []string {
 		c.reconcile()
 		switch b {
 		case c.fw.StatusByte:
+			c.logRealtimeCommand("?")
 			out = append(out, c.statusLine())
 		case c.fw.JogCancelByte:
+			c.logRealtimeCommand("Jog Cancel")
 			c.cancelJog()
 		case c.fw.FeedHoldByte:
+			c.logRealtimeCommand("!")
 			if c.state == StateJog {
 				c.cancelJog()
 			} else {
 				c.setState(StateHold)
 			}
 		case c.fw.CycleStartByte:
+			c.logRealtimeCommand("~")
 			if c.state == StateHold {
 				c.setState(StateIdle)
 				c.startNext()
 			}
-		case c.fw.SoftResetByte, c.fw.AlternateResetByte:
+		case c.fw.SoftResetByte:
+			c.logRealtimeCommand("Ctrl-X")
+			out = append(out, c.resetLocked()...)
+		case c.fw.AlternateResetByte:
+			c.logRealtimeCommand("|")
 			out = append(out, c.resetLocked()...)
 		case '\n', '\r':
 			line := string(c.rx)
 			c.rx = c.rx[:0]
 			out = append(out, c.handleLine(line)...)
 		default:
+			if b > 0x7f {
+				c.logRealtimeCommand(fmt.Sprintf("Ignored Realtime 0x%02X", b))
+				c.log("realtime_ignored", fmt.Sprintf("0x%02X", b))
+				continue
+			}
 			c.rx = append(c.rx, b)
 		}
 	}
@@ -138,14 +171,12 @@ func (c *Controller) handleJog(norm string) []string {
 		return c.errorLine(norm, err.Error(), 2)
 	}
 	if bad := c.limitAxis(mv.Target); bad != "" {
-		c.lastErr = "ALARM:2"
 		c.log("limit", bad)
-		c.setState(StateAlarm)
-		return c.emit(c.fw.Msg("Soft Lim") + c.fw.Alarm(2))
+		return c.errorLine(norm, c.fw.JogLimitMessage, c.fw.JogLimitErrorCode)
 	}
 	if c.active == nil {
 		c.startMove(mv)
-	} else if len(c.queue) < c.mach.PlannerQueueCapacity {
+	} else if c.freePlannerBlocksLocked() > 0 {
 		c.queue = append(c.queue, queuedMove{norm, mv})
 		c.log("queue", "enqueue "+norm)
 	} else {
@@ -196,8 +227,11 @@ func (c *Controller) limitAxis(p [3]float64) string {
 	return ""
 }
 func (c *Controller) startMove(m Move) {
+	c.startMoveAt(m, c.clock.Now())
+}
+func (c *Controller) startMoveAt(m Move, start time.Time) {
 	m.Start = c.pos
-	m.StartTime = c.clock.Now()
+	m.StartTime = start
 	c.active = &m
 	if m.Kind == MoveJog {
 		c.setState(StateJog)
@@ -207,36 +241,41 @@ func (c *Controller) startMove(m Move) {
 	c.log("motion_start", m.Original)
 }
 func (c *Controller) reconcile() {
-	if c.active == nil {
-		return
-	}
 	now := c.clock.Now()
-	prog := 1.0
-	if c.active.Duration > 0 {
-		prog = now.Sub(c.active.StartTime).Seconds() / c.active.Duration
-	}
-	if prog >= 1 {
+	for c.active != nil {
+		prog := 1.0
+		elapsed := now.Sub(c.active.StartTime).Seconds()
+		if c.active.Duration > 0 {
+			prog = elapsed / c.active.Duration
+		}
+		if prog < 1 {
+			if prog < 0 {
+				prog = 0
+			}
+			for i := 0; i < 3; i++ {
+				c.pos[i] = c.active.Start[i] + prog*(c.active.Target[i]-c.active.Start[i])
+			}
+			return
+		}
+
+		completion := c.active.StartTime.Add(time.Duration(c.active.Duration * float64(time.Second)))
 		c.pos = c.active.Target
 		c.log("motion_complete", c.active.Original)
 		c.active = nil
 		c.setState(StateIdle)
-		c.startNext()
-		return
-	}
-	if prog < 0 {
-		prog = 0
-	}
-	for i := 0; i < 3; i++ {
-		c.pos[i] = c.active.Start[i] + prog*(c.active.Target[i]-c.active.Start[i])
+		c.startNextAt(completion)
 	}
 }
 func (c *Controller) startNext() {
+	c.startNextAt(c.clock.Now())
+}
+func (c *Controller) startNextAt(start time.Time) {
 	if c.active != nil || len(c.queue) == 0 {
 		return
 	}
 	q := c.queue[0]
 	c.queue = c.queue[1:]
-	c.startMove(q.move)
+	c.startMoveAt(q.move, start)
 }
 func (c *Controller) cancelJog() {
 	c.reconcile()
@@ -258,7 +297,7 @@ func (c *Controller) resetLocked() []string {
 }
 func (c *Controller) errorLine(line, msg string, code int) []string {
 	c.lastErr = fmt.Sprintf("error:%d", code)
-	return c.emit(line + c.fw.LineEnding + c.fw.Msg(msg) + c.fw.Error(code))
+	return c.emit(c.fw.Echo(line) + c.fw.Msg(msg) + c.fw.Error(code))
 }
 func (c *Controller) setState(s State) {
 	if c.state != s {
@@ -266,28 +305,33 @@ func (c *Controller) setState(s State) {
 		c.state = s
 	}
 }
+func (c *Controller) usedPlannerBlocksLocked() int {
+	used := len(c.queue)
+	if c.active != nil {
+		used++
+	}
+	return used
+}
+func (c *Controller) freePlannerBlocksLocked() int {
+	free := c.mach.PlannerQueueCapacity - c.usedPlannerBlocksLocked()
+	if free < 0 {
+		return 0
+	}
+	return free
+}
 func (c *Controller) statusLine() string {
 	c.reconcile()
-	free := c.mach.PlannerQueueCapacity - len(c.queue)
-	if c.active != nil {
-		free--
-	}
-	if free < 0 {
-		free = 0
-	}
+	free := c.freePlannerBlocksLocked()
 	line := fmt.Sprintf("<%s|M:%.3f,%.3f,%.3f|B:%d,%d|L:%d|0000>%s", c.state, c.pos[0], c.pos[1], c.pos[2], free, c.mach.SerialRXCapacity-len(c.rx), 0, c.fw.LineEnding)
 	c.lastResp = strings.TrimSpace(line)
-	c.log("response", c.lastResp)
+	c.logResponseLines(line)
 	return line
 }
 func (c *Controller) Snapshot() Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reconcile()
-	free := c.mach.PlannerQueueCapacity - len(c.queue)
-	if c.active != nil {
-		free--
-	}
+	free := c.freePlannerBlocksLocked()
 	qs := []string{}
 	for _, q := range c.queue {
 		qs = append(qs, q.line)

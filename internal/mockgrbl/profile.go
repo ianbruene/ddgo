@@ -7,21 +7,24 @@ type FirmwareProfile struct {
 	Version                                                                                    string `json:"version"`
 	LineEnding                                                                                 string `json:"line_ending"`
 	StatusByte, CycleStartByte, FeedHoldByte, SoftResetByte, AlternateResetByte, JogCancelByte byte
-	PlannerBlockCapacity                                                                       int  `json:"planner_block_capacity"`
-	SerialRXCapacity                                                                           int  `json:"serial_rx_capacity"`
-	StrictUnsupported                                                                          bool `json:"strict_unsupported"`
+	PlannerBlockCapacity                                                                       int    `json:"planner_block_capacity"`
+	SerialRXCapacity                                                                           int    `json:"serial_rx_capacity"`
+	StrictUnsupported                                                                          bool   `json:"strict_unsupported"`
+	JogLimitErrorCode                                                                          int    `json:"jog_limit_error_code"`
+	JogLimitMessage                                                                            string `json:"jog_limit_message"`
 }
 
 func DefaultFirmwareProfile() FirmwareProfile {
-	return FirmwareProfile{Name: "GrblDD", Version: "1.1g", LineEnding: "\r\n", StatusByte: '?', CycleStartByte: '~', FeedHoldByte: '!', SoftResetByte: 0x18, AlternateResetByte: '|', JogCancelByte: 0x85, PlannerBlockCapacity: 15, SerialRXCapacity: 128, StrictUnsupported: true}
+	return FirmwareProfile{Name: "GrblDD", Version: "1.1g", LineEnding: "\r\n", StatusByte: '?', CycleStartByte: '~', FeedHoldByte: '!', SoftResetByte: 0x18, AlternateResetByte: '|', JogCancelByte: 0x85, PlannerBlockCapacity: 15, SerialRXCapacity: 128, StrictUnsupported: true, JogLimitErrorCode: 15, JogLimitMessage: "jogLIM"}
 }
 func (p FirmwareProfile) StartupBanner() string {
 	return fmt.Sprintf("\r\nGrbl %s [help:'$']%s", p.Version, p.LineEnding)
 }
-func (p FirmwareProfile) OK() string          { return "ok" + p.LineEnding }
-func (p FirmwareProfile) Msg(s string) string { return "[MSG:" + s + "]" + p.LineEnding }
-func (p FirmwareProfile) Error(n int) string  { return fmt.Sprintf("error:%d%s", n, p.LineEnding) }
-func (p FirmwareProfile) Alarm(n int) string  { return fmt.Sprintf("ALARM:%d%s", n, p.LineEnding) }
+func (p FirmwareProfile) OK() string           { return "ok" + p.LineEnding }
+func (p FirmwareProfile) Msg(s string) string  { return "[MSG:" + s + "]" + p.LineEnding }
+func (p FirmwareProfile) Error(n int) string   { return fmt.Sprintf("error:%d%s", n, p.LineEnding) }
+func (p FirmwareProfile) Echo(s string) string { return "[echo: " + s + "]" + p.LineEnding }
+func (p FirmwareProfile) Alarm(n int) string   { return fmt.Sprintf("ALARM:%d%s", n, p.LineEnding) }
 
 type MachineProfile struct {
 	Name                                   string     `json:"name"`
