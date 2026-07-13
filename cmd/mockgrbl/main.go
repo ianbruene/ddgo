@@ -7,29 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"unsafe"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/ianbruene/ddgo/internal/mockgrbl"
 )
-
-func openPTY() (*os.File, string, error) {
-	fd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		return nil, "", err
-	}
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.TIOCSPTLCK, uintptr(unsafe.Pointer(&[]int32{0}[0]))); errno != 0 {
-		_ = unix.Close(fd)
-		return nil, "", errno
-	}
-	var n uint32
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.TIOCGPTN, uintptr(unsafe.Pointer(&n))); errno != 0 {
-		_ = unix.Close(fd)
-		return nil, "", errno
-	}
-	return os.NewFile(uintptr(fd), "/dev/ptmx"), fmt.Sprintf("/dev/pts/%d", n), nil
-}
 
 func main() {
 	symlink := flag.String("symlink", "/tmp/ddgo-mock-grbl", "stable symlink path")
