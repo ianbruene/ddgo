@@ -209,3 +209,10 @@ func TestParseStatusReportInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestParseGrblDDStatusReport(t *testing.T) {
+	report, ok := ParseStatusReport("<Jog|M:-1.000,-2.000,-3.000|B:14,128|L:0|0000>")
+	if !ok || !report.HasMPos || report.MPos != [3]float64{-1, -2, -3} || report.State != "Jog" {
+		t.Fatalf("GrblDD M: parse failed: %+v ok=%v", report, ok)
+	}
+}
