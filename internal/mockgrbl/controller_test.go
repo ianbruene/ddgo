@@ -62,6 +62,40 @@ func TestEndpointNaturalCompleteAndLimit(t *testing.T) {
 		t.Fatalf("unexpected limit snapshot: %+v", snap)
 	}
 }
+func TestRelativeJogIdleAndQueuedSemantics(t *testing.T) {
+	c, clk := testCtl()
+	if got := joined(c.ProcessBytes([]byte("$J=G91 X-10 F60\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	clk.Advance(5 * time.Second)
+	if got := c.Snapshot().MachinePosition; got[0] != -5 || got[1] != 0 || got[2] != 0 {
+		t.Fatalf("position = %v", got)
+	}
+
+	c, _ = testCtl()
+	if got := joined(c.ProcessBytes([]byte("$J=G91 X-10 F60\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	out := joined(c.ProcessBytes([]byte("$J=G91 X-10 F60\n")))
+	if !strings.Contains(out, "[echo: $J=G91X-10F60]\r\n[MSG:jogINV]\r\nerror:16") {
+		t.Fatal(out)
+	}
+	if snap := c.Snapshot(); snap.ActiveMove == nil || snap.QueuedCommandCount != 0 {
+		t.Fatalf("unexpected snapshot: %+v", snap)
+	}
+
+	c, _ = testCtl()
+	if got := joined(c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	if got := joined(c.ProcessBytes([]byte("$J=G53 G90 Y-10 F60\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+	if snap := c.Snapshot(); snap.ActiveMove == nil || snap.QueuedCommandCount != 1 {
+		t.Fatalf("unexpected absolute queued snapshot: %+v", snap)
+	}
+}
+
 func TestRealtimeBypassesQueueResetB(t *testing.T) {
 	c, clk := testCtl()
 	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
@@ -81,6 +115,17 @@ func TestRealtimeBypassesQueueResetB(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+func TestBuildInfoIsGrblDDShaped(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte("$I\n")))
+	if !strings.Contains(out, "[grbl:1.1g GG:") || !strings.Contains(out, "PCB:") || !strings.Contains(out, "YMD:20240619") {
+		t.Fatal(out)
+	}
+	if !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatal(out)
+	}
+}
+
 func TestMalformedAndHardLimit(t *testing.T) {
 	c, _ := testCtl()
 	out := joined(c.ProcessBytes([]byte("G2 X1\n")))
@@ -128,6 +173,34 @@ func TestReconcileCarriesPartialElapsedIntoNextMove(t *testing.T) {
 	}
 }
 
+func TestReconcileMotionLogsUseSimulatedTimes(t *testing.T) {
+	c, clk := testCtl()
+	c.ProcessBytes([]byte("$J=G53 G90 X-1 F60\n"))
+	c.ProcessBytes([]byte("$J=G53 G90 Y-1 F60\n"))
+	observation := clk.Now().Add(3 * time.Second)
+	clk.T = observation
+	c.Snapshot()
+
+	var starts, completes []LogEntry
+	for _, e := range c.Events() {
+		switch e.Kind {
+		case "motion_start":
+			starts = append(starts, e)
+		case "motion_complete":
+			completes = append(completes, e)
+		}
+	}
+	if len(starts) != 2 || len(completes) != 2 {
+		t.Fatalf("starts=%+v completes=%+v", starts, completes)
+	}
+	if !starts[1].Time.Equal(completes[0].Time) {
+		t.Fatalf("second start time = %s, first complete time = %s", starts[1].Time, completes[0].Time)
+	}
+	if completes[1].Time.After(observation) {
+		t.Fatalf("final complete time = %s after observation %s", completes[1].Time, observation)
+	}
+}
+
 func TestPlannerCapacityCountsActiveMove(t *testing.T) {
 	fw := DefaultFirmwareProfile()
 	mach := DefaultMachineProfile()
@@ -150,6 +223,40 @@ func TestPlannerCapacityCountsActiveMove(t *testing.T) {
 		t.Fatalf("unexpected snapshot: %+v", snap)
 	}
 	if st := joined(c.ProcessBytes([]byte("?"))); !strings.Contains(st, "|B:0,") {
+		t.Fatal(st)
+	}
+}
+
+func TestRXCapacityClampedAndOverflowHandled(t *testing.T) {
+	fw := DefaultFirmwareProfile()
+	mach := DefaultMachineProfile()
+	mach.SerialRXCapacity = 3
+	c := NewController(fw, mach, &ManualClock{T: time.Unix(0, 0)})
+
+	c.ProcessBytes([]byte("abcd"))
+	st := joined(c.ProcessBytes([]byte("?")))
+	if !strings.Contains(st, "|B:15,0|") {
+		t.Fatal(st)
+	}
+
+	out := joined(c.ProcessBytes([]byte("\n")))
+	if !strings.Contains(out, "[MSG:2long]\r\nerror:14") {
+		t.Fatal(out)
+	}
+	if got := joined(c.ProcessBytes([]byte("$X\n"))); got != "ok\r\n" {
+		t.Fatal(got)
+	}
+}
+
+func TestRealtimeStatusDuringRXOverflow(t *testing.T) {
+	fw := DefaultFirmwareProfile()
+	mach := DefaultMachineProfile()
+	mach.SerialRXCapacity = 3
+	c := NewController(fw, mach, &ManualClock{T: time.Unix(0, 0)})
+
+	c.ProcessBytes([]byte("abcd"))
+	st := joined(c.ProcessBytes([]byte("?")))
+	if !strings.Contains(st, "<Idle|M:0.000,0.000,0.000|B:15,0|") {
 		t.Fatal(st)
 	}
 }

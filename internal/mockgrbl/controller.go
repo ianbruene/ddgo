@@ -27,6 +27,7 @@ type Controller struct {
 	responses                  []LogEntry
 	events                     []LogEntry
 	lastCmd, lastResp, lastErr string
+	rxOverflow                 bool
 }
 
 func NewController(fw FirmwareProfile, mach MachineProfile, clock Clock) *Controller {
@@ -38,6 +39,27 @@ func NewController(fw FirmwareProfile, mach MachineProfile, clock Clock) *Contro
 	}
 	if fw.JogLimitErrorCode == 0 {
 		fw.JogLimitErrorCode = 15
+	}
+	if fw.InvalidJogMessage == "" {
+		fw.InvalidJogMessage = "jogINV"
+	}
+	if fw.InvalidJogErrorCode == 0 {
+		fw.InvalidJogErrorCode = 16
+	}
+	if fw.LineOverflowMessage == "" {
+		fw.LineOverflowMessage = "2long"
+	}
+	if fw.LineOverflowErrorCode == 0 {
+		fw.LineOverflowErrorCode = 14
+	}
+	if fw.BuildDate == "" {
+		fw.BuildDate = "20240619"
+	}
+	if fw.GGRevision == "" {
+		fw.GGRevision = "3A"
+	}
+	if fw.PCBRevision == "" {
+		fw.PCBRevision = "3A"
 	}
 	if mach.Name == "" {
 		mach = DefaultMachineProfile()
@@ -59,7 +81,10 @@ func (c *Controller) Connect() []string {
 	return c.emit(c.fw.StartupBanner())
 }
 func (c *Controller) log(kind, text string) {
-	e := LogEntry{c.clock.Now(), kind, text}
+	c.logAt(kind, text, c.clock.Now())
+}
+func (c *Controller) logAt(kind, text string, t time.Time) {
+	e := LogEntry{t, kind, text}
 	c.logs = append(c.logs, e)
 	c.events = append(c.events, e)
 	if kind == "command" {
@@ -120,6 +145,12 @@ func (c *Controller) ProcessBytes(bs []byte) []string {
 			c.logRealtimeCommand("|")
 			out = append(out, c.resetLocked()...)
 		case '\n', '\r':
+			if c.rxOverflow {
+				c.rx = c.rx[:0]
+				c.rxOverflow = false
+				out = append(out, c.errorLine("", c.fw.LineOverflowMessage, c.fw.LineOverflowErrorCode)...)
+				continue
+			}
 			line := string(c.rx)
 			c.rx = c.rx[:0]
 			out = append(out, c.handleLine(line)...)
@@ -127,6 +158,10 @@ func (c *Controller) ProcessBytes(bs []byte) []string {
 			if b > 0x7f {
 				c.logRealtimeCommand(fmt.Sprintf("Ignored Realtime 0x%02X", b))
 				c.log("realtime_ignored", fmt.Sprintf("0x%02X", b))
+				continue
+			}
+			if c.rxOverflow || len(c.rx) >= c.mach.SerialRXCapacity {
+				c.rxOverflow = true
 				continue
 			}
 			c.rx = append(c.rx, b)
@@ -155,7 +190,7 @@ func (c *Controller) handleLine(raw string) []string {
 		c.setState(StateIdle)
 		return c.emit(c.fw.OK())
 	case "$I":
-		return c.emit(fmt.Sprintf("[VER:%s:%s Ghost Gunner mock]%s", c.fw.Version, c.fw.Name, c.fw.LineEnding) + c.fw.OK())
+		return c.emit(c.fw.BuildInfo() + c.fw.LineEnding + c.fw.OK())
 	case "$G":
 		return c.emit("[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]" + c.fw.LineEnding + c.fw.OK())
 	default:
@@ -166,9 +201,12 @@ func (c *Controller) handleJog(norm string) []string {
 	if c.state == StateAlarm {
 		return c.errorLine(norm, "Busy", 9)
 	}
-	mv, err := c.parseJog(norm)
+	mv, rel, err := c.parseJog(norm)
 	if err != nil {
 		return c.errorLine(norm, err.Error(), 2)
+	}
+	if rel && (c.active != nil || len(c.queue) > 0) {
+		return c.errorLine(norm, c.fw.InvalidJogMessage, c.fw.InvalidJogErrorCode)
 	}
 	if bad := c.limitAxis(mv.Target); bad != "" {
 		c.log("limit", bad)
@@ -184,7 +222,7 @@ func (c *Controller) handleJog(norm string) []string {
 	}
 	return c.emit(c.fw.OK())
 }
-func (c *Controller) parseJog(norm string) (Move, error) {
+func (c *Controller) parseJog(norm string) (Move, bool, error) {
 	body := strings.TrimPrefix(norm, "$J=")
 	w := parseWords(body)
 	feed := w['F']
@@ -203,19 +241,19 @@ func (c *Controller) parseJog(norm string) (Move, error) {
 			} else if rel {
 				target[i] += v
 			} else {
-				return Move{}, fmt.Errorf("missing distance mode")
+				return Move{}, rel, fmt.Errorf("missing distance mode")
 			}
 		}
 	}
 	if axes != 1 {
-		return Move{}, fmt.Errorf("one axis required")
+		return Move{}, rel, fmt.Errorf("one axis required")
 	}
 	dist := math.Sqrt(sq(target[0]-c.pos[0]) + sq(target[1]-c.pos[1]) + sq(target[2]-c.pos[2]))
 	dur := dist / feed * 60
 	if dur <= 0 {
 		dur = 0
 	}
-	return Move{Original: norm, Kind: MoveJog, Start: c.pos, Target: target, StartTime: c.clock.Now(), Duration: dur, Feed: feed}, nil
+	return Move{Original: norm, Kind: MoveJog, Start: c.pos, Target: target, StartTime: c.clock.Now(), Duration: dur, Feed: feed}, rel, nil
 }
 func sq(f float64) float64 { return f * f }
 func (c *Controller) limitAxis(p [3]float64) string {
@@ -238,7 +276,7 @@ func (c *Controller) startMoveAt(m Move, start time.Time) {
 	} else {
 		c.setState(StateRun)
 	}
-	c.log("motion_start", m.Original)
+	c.logAt("motion_start", m.Original, start)
 }
 func (c *Controller) reconcile() {
 	now := c.clock.Now()
@@ -260,7 +298,7 @@ func (c *Controller) reconcile() {
 
 		completion := c.active.StartTime.Add(time.Duration(c.active.Duration * float64(time.Second)))
 		c.pos = c.active.Target
-		c.log("motion_complete", c.active.Original)
+		c.logAt("motion_complete", c.active.Original, completion)
 		c.active = nil
 		c.setState(StateIdle)
 		c.startNextAt(completion)
@@ -290,6 +328,7 @@ func (c *Controller) resetLocked() []string {
 	c.active = nil
 	c.queue = nil
 	c.rx = nil
+	c.rxOverflow = false
 	c.setState(StateIdle)
 	c.lastErr = "ALARM:3"
 	c.log("reset", "reset")
@@ -319,10 +358,18 @@ func (c *Controller) freePlannerBlocksLocked() int {
 	}
 	return free
 }
+func (c *Controller) freeRXBytesLocked() int {
+	free := c.mach.SerialRXCapacity - len(c.rx)
+	if free < 0 || c.rxOverflow {
+		return 0
+	}
+	return free
+}
+
 func (c *Controller) statusLine() string {
 	c.reconcile()
 	free := c.freePlannerBlocksLocked()
-	line := fmt.Sprintf("<%s|M:%.3f,%.3f,%.3f|B:%d,%d|L:%d|0000>%s", c.state, c.pos[0], c.pos[1], c.pos[2], free, c.mach.SerialRXCapacity-len(c.rx), 0, c.fw.LineEnding)
+	line := fmt.Sprintf("<%s|M:%.3f,%.3f,%.3f|B:%d,%d|L:%d|0000>%s", c.state, c.pos[0], c.pos[1], c.pos[2], free, c.freeRXBytesLocked(), 0, c.fw.LineEnding)
 	c.lastResp = strings.TrimSpace(line)
 	c.logResponseLines(line)
 	return line
@@ -349,7 +396,7 @@ func (c *Controller) Snapshot() Snapshot {
 		m := *c.active
 		am = &MoveSnapshot{Move: &m, ElapsedSeconds: e, Progress: p}
 	}
-	return Snapshot{State: c.state, MachinePosition: c.pos, ActiveMove: am, QueueCapacity: c.mach.PlannerQueueCapacity, QueuedCommandCount: len(c.queue), QueuedCommands: qs, FreePlannerBlocks: free, FreeRXBytes: c.mach.SerialRXCapacity - len(c.rx), LastCommand: c.lastCmd, LastResponse: c.lastResp, LastErrorAlarm: c.lastErr, ProfileName: c.fw.Name, ProfileVersion: c.fw.Version}
+	return Snapshot{State: c.state, MachinePosition: c.pos, ActiveMove: am, QueueCapacity: c.mach.PlannerQueueCapacity, QueuedCommandCount: len(c.queue), QueuedCommands: qs, FreePlannerBlocks: free, FreeRXBytes: c.freeRXBytesLocked(), LastCommand: c.lastCmd, LastResponse: c.lastResp, LastErrorAlarm: c.lastErr, ProfileName: c.fw.Name, ProfileVersion: c.fw.Version}
 }
 func (c *Controller) Commands() []LogEntry {
 	c.mu.Lock()

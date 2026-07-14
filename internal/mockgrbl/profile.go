@@ -12,10 +12,17 @@ type FirmwareProfile struct {
 	StrictUnsupported                                                                          bool   `json:"strict_unsupported"`
 	JogLimitErrorCode                                                                          int    `json:"jog_limit_error_code"`
 	JogLimitMessage                                                                            string `json:"jog_limit_message"`
+	InvalidJogErrorCode                                                                        int    `json:"invalid_jog_error_code"`
+	InvalidJogMessage                                                                          string `json:"invalid_jog_message"`
+	LineOverflowErrorCode                                                                      int    `json:"line_overflow_error_code"`
+	LineOverflowMessage                                                                        string `json:"line_overflow_message"`
+	BuildDate                                                                                  string `json:"build_date"`
+	GGRevision                                                                                 string `json:"gg_revision"`
+	PCBRevision                                                                                string `json:"pcb_revision"`
 }
 
 func DefaultFirmwareProfile() FirmwareProfile {
-	return FirmwareProfile{Name: "GrblDD", Version: "1.1g", LineEnding: "\r\n", StatusByte: '?', CycleStartByte: '~', FeedHoldByte: '!', SoftResetByte: 0x18, AlternateResetByte: '|', JogCancelByte: 0x85, PlannerBlockCapacity: 15, SerialRXCapacity: 128, StrictUnsupported: true, JogLimitErrorCode: 15, JogLimitMessage: "jogLIM"}
+	return FirmwareProfile{Name: "GrblDD", Version: "1.1g", LineEnding: "\r\n", StatusByte: '?', CycleStartByte: '~', FeedHoldByte: '!', SoftResetByte: 0x18, AlternateResetByte: '|', JogCancelByte: 0x85, PlannerBlockCapacity: 15, SerialRXCapacity: 128, StrictUnsupported: true, JogLimitErrorCode: 15, JogLimitMessage: "jogLIM", InvalidJogErrorCode: 16, InvalidJogMessage: "jogINV", LineOverflowErrorCode: 14, LineOverflowMessage: "2long", BuildDate: "20240619", GGRevision: "3A", PCBRevision: "3A"}
 }
 func (p FirmwareProfile) StartupBanner() string {
 	return fmt.Sprintf("\r\nGrbl %s [help:'$']%s", p.Version, p.LineEnding)
@@ -38,4 +45,8 @@ type MachineProfile struct {
 
 func DefaultMachineProfile() MachineProfile {
 	return MachineProfile{Name: "GG3-ish", Min: [3]float64{-86.5, -241.5, -78.5}, Max: [3]float64{0, 0, 0}, DefaultFeed: 500, InitialPosition: [3]float64{0, 0, 0}, SoftLimits: true, HardLimits: true, PlannerQueueCapacity: 15, SerialRXCapacity: 128}
+}
+
+func (p FirmwareProfile) BuildInfo() string {
+	return fmt.Sprintf("[grbl:%s GG:%s PCB:%s YMD:%s]", p.Version, p.GGRevision, p.PCBRevision, p.BuildDate)
 }
