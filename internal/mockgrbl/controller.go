@@ -146,9 +146,12 @@ func (c *Controller) ProcessBytes(bs []byte) []string {
 			out = append(out, c.resetLocked()...)
 		case '\n', '\r':
 			if c.rxOverflow {
+				line := NormalizeLine(string(c.rx))
 				c.rx = c.rx[:0]
 				c.rxOverflow = false
-				out = append(out, c.errorLine("", c.fw.LineOverflowMessage, c.fw.LineOverflowErrorCode)...)
+				// This models GrblDD's line-length-exceeded path for an overlong buffered line.
+				// Exact RX-ring overflow behavior should be confirmed with a hardware transcript.
+				out = append(out, c.errorLineMaybeEcho(line, c.fw.LineOverflowMessage, c.fw.LineOverflowErrorCode)...)
 				continue
 			}
 			line := string(c.rx)
@@ -201,7 +204,8 @@ func (c *Controller) handleJog(norm string) []string {
 	if c.state == StateAlarm {
 		return c.errorLine(norm, "Busy", 9)
 	}
-	mv, rel, err := c.parseJog(norm)
+	base := c.plannerBasePositionLocked()
+	mv, rel, err := c.parseJog(norm, base)
 	if err != nil {
 		return c.errorLine(norm, err.Error(), 2)
 	}
@@ -222,14 +226,24 @@ func (c *Controller) handleJog(norm string) []string {
 	}
 	return c.emit(c.fw.OK())
 }
-func (c *Controller) parseJog(norm string) (Move, bool, error) {
+func (c *Controller) plannerBasePositionLocked() [3]float64 {
+	if len(c.queue) > 0 {
+		return c.queue[len(c.queue)-1].move.Target
+	}
+	if c.active != nil {
+		return c.active.Target
+	}
+	return c.pos
+}
+
+func (c *Controller) parseJog(norm string, base [3]float64) (Move, bool, error) {
 	body := strings.TrimPrefix(norm, "$J=")
 	w := parseWords(body)
 	feed := w['F']
 	if feed <= 0 {
 		feed = c.mach.DefaultFeed
 	}
-	target := c.pos
+	target := base
 	abs := strings.Contains(body, "G53") && strings.Contains(body, "G90")
 	rel := strings.Contains(body, "G91")
 	axes := 0
@@ -248,12 +262,12 @@ func (c *Controller) parseJog(norm string) (Move, bool, error) {
 	if axes != 1 {
 		return Move{}, rel, fmt.Errorf("one axis required")
 	}
-	dist := math.Sqrt(sq(target[0]-c.pos[0]) + sq(target[1]-c.pos[1]) + sq(target[2]-c.pos[2]))
+	dist := math.Sqrt(sq(target[0]-base[0]) + sq(target[1]-base[1]) + sq(target[2]-base[2]))
 	dur := dist / feed * 60
 	if dur <= 0 {
 		dur = 0
 	}
-	return Move{Original: norm, Kind: MoveJog, Start: c.pos, Target: target, StartTime: c.clock.Now(), Duration: dur, Feed: feed}, rel, nil
+	return Move{Original: norm, Kind: MoveJog, Start: base, Target: target, StartTime: c.clock.Now(), Duration: dur, Feed: feed}, rel, nil
 }
 func sq(f float64) float64 { return f * f }
 func (c *Controller) limitAxis(p [3]float64) string {
@@ -337,6 +351,14 @@ func (c *Controller) resetLocked() []string {
 func (c *Controller) errorLine(line, msg string, code int) []string {
 	c.lastErr = fmt.Sprintf("error:%d", code)
 	return c.emit(c.fw.Echo(line) + c.fw.Msg(msg) + c.fw.Error(code))
+}
+func (c *Controller) errorLineMaybeEcho(line, msg string, code int) []string {
+	c.lastErr = fmt.Sprintf("error:%d", code)
+	out := c.fw.Msg(msg) + c.fw.Error(code)
+	if line != "" {
+		out = c.fw.Echo(line) + out
+	}
+	return c.emit(out)
 }
 func (c *Controller) setState(s State) {
 	if c.state != s {

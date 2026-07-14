@@ -146,14 +146,14 @@ func TestReconcileConsumesElapsedAcrossQueuedMoves(t *testing.T) {
 
 	clk.Advance(50 * time.Second)
 	st := joined(c.ProcessBytes([]byte("?")))
-	if !strings.Contains(st, "<Idle|M:0.000,0.000,-10.000|") {
+	if !strings.Contains(st, "<Idle|M:-10.000,-10.000,-10.000|") {
 		t.Fatal(st)
 	}
 	snap := c.Snapshot()
 	if snap.State != StateIdle || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 {
 		t.Fatalf("unexpected snapshot after reconciliation: %+v", snap)
 	}
-	if snap.MachinePosition != [3]float64{0, 0, -10} {
+	if snap.MachinePosition != [3]float64{-10, -10, -10} {
 		t.Fatalf("position = %v", snap.MachinePosition)
 	}
 }
@@ -168,8 +168,8 @@ func TestReconcileCarriesPartialElapsedIntoNextMove(t *testing.T) {
 	if snap.State != StateJog || snap.ActiveMove == nil || snap.QueuedCommandCount != 0 {
 		t.Fatalf("unexpected snapshot: %+v", snap)
 	}
-	if got := snap.MachinePosition; got[0] != -5 || got[1] <= -6 || got[1] >= -4 || got[2] != 0 {
-		t.Fatalf("position = %v, want midway through second move", got)
+	if got := snap.MachinePosition; got[0] != -10 || got[1] >= 0 || got[1] <= -10 || got[2] != 0 {
+		t.Fatalf("position = %v, want X held at first endpoint and Y midway through second move", got)
 	}
 }
 
@@ -240,11 +240,29 @@ func TestRXCapacityClampedAndOverflowHandled(t *testing.T) {
 	}
 
 	out := joined(c.ProcessBytes([]byte("\n")))
-	if !strings.Contains(out, "[MSG:2long]\r\nerror:14") {
+	if !strings.Contains(out, "[echo: ABC]\r\n[MSG:2long]\r\nerror:14") {
+		t.Fatal(out)
+	}
+	if strings.Contains(out, "[echo: ]") {
 		t.Fatal(out)
 	}
 	if got := joined(c.ProcessBytes([]byte("$X\n"))); got != "ok\r\n" {
 		t.Fatal(got)
+	}
+}
+
+func TestRXOverflowWithoutBufferedLineOmitsEmptyEcho(t *testing.T) {
+	fw := DefaultFirmwareProfile()
+	mach := DefaultMachineProfile()
+	mach.SerialRXCapacity = -1
+	c := NewController(fw, mach, &ManualClock{T: time.Unix(0, 0)})
+
+	out := joined(c.ProcessBytes([]byte("a\n")))
+	if strings.Contains(out, "[echo: ]") {
+		t.Fatal(out)
+	}
+	if !strings.Contains(out, "[MSG:2long]\r\nerror:14") {
+		t.Fatal(out)
 	}
 }
 
