@@ -142,6 +142,8 @@ func (c *Controller) Disconnect() error {
 	c.state.MachineState = ""
 	c.state.HasMachinePosition = false
 	c.state.HasWorkPosition = false
+	c.state.WorkCoordinateOffset = [3]float64{}
+	c.state.HasWorkCoordinateOffset = false
 	c.state.HasFeedSpindle = false
 	c.state.LastStatusRaw = ""
 	state := c.state
@@ -779,6 +781,10 @@ func (c *Controller) runTransportEventBridge() {
 				if report.HasWPos {
 					c.state.WorkPosition = report.WPos
 					c.state.HasWorkPosition = true
+				}
+				if report.HasWCO {
+					c.state.WorkCoordinateOffset = report.WCO
+					c.state.HasWorkCoordinateOffset = true
 				}
 				if report.HasFS {
 					c.state.Feed = report.Feed

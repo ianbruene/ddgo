@@ -2470,6 +2470,31 @@ func TestControllerAutomaticStatusPollSuppressesTXAndRXButUpdatesState(t *testin
 	}
 }
 
+func TestControllerTracksGrblDDWorkCoordinateOffset(t *testing.T) {
+	t.Parallel()
+
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("COM1")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+
+	fake.InjectRX("<Idle|M:1.000,2.000,3.000|B:15,128|L:0|0000|W:4.000,5.000,6.000>")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
+
+	state := controller.Snapshot()
+	if !state.HasMachinePosition || state.MachinePosition != [3]float64{1, 2, 3} {
+		t.Fatalf("MachinePosition = %#v (has %v), want [1 2 3]", state.MachinePosition, state.HasMachinePosition)
+	}
+	if !state.HasWorkCoordinateOffset || state.WorkCoordinateOffset != [3]float64{4, 5, 6} {
+		t.Fatalf("WorkCoordinateOffset = %#v (has %v), want [4 5 6]", state.WorkCoordinateOffset, state.HasWorkCoordinateOffset)
+	}
+	if state.HasWorkPosition {
+		t.Fatalf("HasWorkPosition = true, WorkPosition = %#v", state.WorkPosition)
+	}
+}
+
 func TestControllerManualStatusLogsTXAndRX(t *testing.T) {
 	t.Parallel()
 
