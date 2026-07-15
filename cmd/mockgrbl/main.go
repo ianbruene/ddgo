@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"syscall"
 
 	"github.com/ianbruene/ddgo/internal/mockgrbl"
 )
@@ -40,9 +42,13 @@ func main() {
 			}
 		}
 		if err != nil {
-			if err != io.EOF {
-				fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+				return
 			}
+			if pathErr, ok := err.(*os.PathError); ok && errors.Is(pathErr.Err, syscall.EIO) {
+				continue
+			}
+			fmt.Fprintln(os.Stderr, err)
 			return
 		}
 	}

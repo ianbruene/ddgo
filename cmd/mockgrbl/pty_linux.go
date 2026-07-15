@@ -25,5 +25,31 @@ func openPTY() (*os.File, string, error) {
 		_ = unix.Close(fd)
 		return nil, "", errno
 	}
-	return os.NewFile(uintptr(fd), "/dev/ptmx"), fmt.Sprintf("/dev/pts/%d", n), nil
+	slave := fmt.Sprintf("/dev/pts/%d", n)
+	if err := configureRawSlave(slave); err != nil {
+		_ = unix.Close(fd)
+		return nil, "", err
+	}
+	return os.NewFile(uintptr(fd), "/dev/ptmx"), slave, nil
+}
+
+func configureRawSlave(path string) error {
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+
+	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return err
+	}
+	termios.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
+	termios.Oflag &^= unix.OPOST
+	termios.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
+	termios.Cflag &^= unix.CSIZE | unix.PARENB
+	termios.Cflag |= unix.CS8
+	termios.Cc[unix.VMIN] = 1
+	termios.Cc[unix.VTIME] = 0
+	return unix.IoctlSetTermios(fd, unix.TCSETS, termios)
 }
