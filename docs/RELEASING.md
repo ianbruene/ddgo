@@ -32,18 +32,55 @@ Do not use `macos-14`, `macos-14-large`, `macos-latest`, or `macos-latest-large`
 
 ## Linux
 
-The Linux CI/CD artifact is `DDGo-linux-amd64.tar.gz`. It contains a `linux-amd64/` folder with:
+The Linux CI/CD artifact is `DDGo-linux-amd64.tar.gz`. It contains a full staged `DDGo-linux-amd64/` distribution:
 
-- `ddgo`: the DDGo CNC UI command built with `-tags 'miqt serial'`.
-- `mockgrbl`: the Linux PTY-backed mock machine for local development/testing.
-- `README-artifact.txt`: artifact contents and quick usage notes.
+```text
+DDGo-linux-amd64/
+  ddgo
+  mockgrbl
+  run-ddgo.sh
+  lib/
+  plugins/
+    platforms/
+      libqxcb.so
+  README-artifact.txt
+```
 
-The workflow builds the archive with:
+Users should extract the archive and run DDGo through the launcher:
 
 ```bash
-GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags 'miqt serial' -trimpath -ldflags='-s -w' -o dist/linux-amd64/ddgo ./cmd/ddgo
-GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o dist/linux-amd64/mockgrbl ./cmd/mockgrbl
-tar -C dist -czf dist/DDGo-linux-amd64.tar.gz linux-amd64
+./run-ddgo.sh
+```
+
+The launcher sets `LD_LIBRARY_PATH`, `QT_PLUGIN_PATH`, and `QT_QPA_PLATFORM_PLUGIN_PATH` so the MIQT/Qt GUI can find the bundled runtime libraries and Qt plugins. Running `./ddgo` directly may fail on systems that do not already provide matching Qt libraries/plugins.
+
+`mockgrbl` is included in the same folder and can be run directly from the artifact for local development/testing.
+
+The artifact bundles Qt runtime/plugin dependencies needed by the MIQT GUI, including the `xcb` platform plugin and related plugin directories copied from the build runner. The artifact is built on `ubuntu-latest` and bundles Qt/runtime libraries needed by the app. Compatibility with older distributions is limited by the runner's glibc/system ABI.
+
+The workflow builds and verifies the archive with:
+
+```bash
+rm -rf dist
+mkdir -p dist/build-linux
+
+GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
+  go build -tags 'miqt serial' -trimpath -ldflags='-s -w' \
+  -o dist/build-linux/ddgo \
+  ./cmd/ddgo
+
+GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
+  go build -trimpath -ldflags='-s -w' \
+  -o dist/build-linux/mockgrbl \
+  ./cmd/mockgrbl
+
+bash scripts/package-linux-app.sh \
+  dist/build-linux/ddgo \
+  dist/build-linux/mockgrbl \
+  dist/DDGo-linux-amd64
+
+bash scripts/verify-linux-dist.sh dist/DDGo-linux-amd64
+tar -C dist -czf dist/DDGo-linux-amd64.tar.gz DDGo-linux-amd64
 ```
 
 ## macOS universal build flow

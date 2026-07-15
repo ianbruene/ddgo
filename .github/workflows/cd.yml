@@ -21,44 +21,42 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config qtbase5-dev
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            qtbase5-dev \
+            qtbase5-dev-tools \
+            libxcb-xinerama0 \
+            libxcb-xinput0 \
+            libxcb-cursor0 \
+            libxkbcommon-x11-0 \
+            file
       - name: Build Linux artifact
         run: |
           set -euo pipefail
-          rm -rf dist/linux-amd64
-          mkdir -p dist/linux-amd64
+          rm -rf dist
+          mkdir -p dist/build-linux
 
           GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
             go build -tags "miqt serial" -trimpath -ldflags="-s -w" \
-            -o dist/linux-amd64/ddgo \
+            -o dist/build-linux/ddgo \
             ./cmd/ddgo
 
           GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
             go build -trimpath -ldflags="-s -w" \
-            -o dist/linux-amd64/mockgrbl \
+            -o dist/build-linux/mockgrbl \
             ./cmd/mockgrbl
 
-          cat > dist/linux-amd64/README-artifact.txt <<'EOF'
-          DDGo Linux amd64 artifact.
+          bash scripts/package-linux-app.sh \
+            dist/build-linux/ddgo \
+            dist/build-linux/mockgrbl \
+            dist/DDGo-linux-amd64
 
-          Contents:
-          - ddgo: DDGo CNC UI command built for Linux amd64 with MIQT UI and serial support.
-          - mockgrbl: GrblDD mock machine for local development/testing.
+          bash scripts/verify-linux-dist.sh dist/DDGo-linux-amd64
 
-          mockgrbl is Linux PTY-backed and accepts:
-            -symlink <path>
-            -http <addr>
-          EOF
-
-          tar -C dist -czf dist/DDGo-linux-amd64.tar.gz linux-amd64
-      - name: Verify Linux artifact
-        run: |
-          set -euo pipefail
+          tar -C dist -czf dist/DDGo-linux-amd64.tar.gz DDGo-linux-amd64
           test -s dist/DDGo-linux-amd64.tar.gz
           tar -tzf dist/DDGo-linux-amd64.tar.gz
-          test -x dist/linux-amd64/ddgo
-          test -x dist/linux-amd64/mockgrbl
-          dist/linux-amd64/mockgrbl -h
       - uses: actions/upload-artifact@v4
         with:
           name: DDGo-linux-amd64
@@ -376,7 +374,7 @@ jobs:
           body: |
             ### Linux
 
-            `DDGo-linux-amd64.tar.gz` contains the Linux amd64 `ddgo` GUI command built with MIQT UI and serial support, plus the `mockgrbl` development/testing binary.
+            `DDGo-linux-amd64.tar.gz` contains a `DDGo-linux-amd64/` distribution with the Linux amd64 `ddgo` GUI command, `mockgrbl`, a launcher script, and bundled Qt/runtime libraries and plugins needed by the MIQT UI. Run `./run-ddgo.sh` from the extracted folder so the bundled library and Qt plugin paths are configured.
 
             ### macOS
 
