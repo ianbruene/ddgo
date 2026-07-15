@@ -5,6 +5,7 @@ This project ships GUI desktop artifacts built with `-tags 'miqt serial'`.
 ## Release policy
 
 - Minimum supported macOS: `15.0`
+- Linux release artifact: `DDGo-linux-amd64.tar.gz`
 - macOS release artifact: `DDGo-macos-universal.dmg`
 - macOS architectures: `arm64` + `x86_64`
 - Windows release artifacts:
@@ -15,6 +16,7 @@ macOS 14 and earlier are no longer supported.
 
 ## Artifacts
 
+- `DDGo-linux-amd64.tar.gz`
 - `DDGo-macos-universal.dmg`
 - `DDGo-windows-amd64-setup.exe`
 - `DDGo-windows-amd64.zip`
@@ -27,6 +29,22 @@ Use explicit macOS runner labels for release builds:
 - Intel slice: `macos-15-intel`
 
 Do not use `macos-14`, `macos-14-large`, `macos-latest`, or `macos-latest-large` for release artifacts.
+
+## Linux
+
+The Linux CI/CD artifact is `DDGo-linux-amd64.tar.gz`. It contains a `linux-amd64/` folder with:
+
+- `ddgo`: the DDGo CNC UI command built with `-tags 'miqt serial'`.
+- `mockgrbl`: the Linux PTY-backed mock machine for local development/testing.
+- `README-artifact.txt`: artifact contents and quick usage notes.
+
+The workflow builds the archive with:
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags 'miqt serial' -trimpath -ldflags='-s -w' -o dist/linux-amd64/ddgo ./cmd/ddgo
+GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o dist/linux-amd64/mockgrbl ./cmd/mockgrbl
+tar -C dist -czf dist/DDGo-linux-amd64.tar.gz linux-amd64
+```
 
 ## macOS universal build flow
 
