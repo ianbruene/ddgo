@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,14 @@ type mockState struct {
 	ActiveMove         interface{} `json:"active_move"`
 	QueuedCommandCount int         `json:"queued_command_count"`
 }
+
+type mockLogEntry struct {
+	Time time.Time `json:"time"`
+	Kind string    `json:"kind"`
+	Text string    `json:"text"`
+}
+
+const posTol = 0.05
 
 func startMockGRBL(t *testing.T) *mockProcess {
 	t.Helper()
@@ -105,20 +114,45 @@ func (m *mockProcess) state(t *testing.T) mockState {
 	return state
 }
 
+func (m *mockProcess) responses(t *testing.T) []mockLogEntry {
+	t.Helper()
+	var responses []mockLogEntry
+	m.getJSON(t, "/responses", &responses)
+	return responses
+}
+
+func (m *mockProcess) events(t *testing.T) []mockLogEntry {
+	t.Helper()
+	var events []mockLogEntry
+	m.getJSON(t, "/events", &events)
+	return events
+}
+
 func (m *mockProcess) fetchState() (mockState, error) {
-	resp, err := m.client.Get(m.HTTPBase + "/state")
-	if err != nil {
-		return mockState{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return mockState{}, fmt.Errorf("GET /state: %s", resp.Status)
-	}
 	var state mockState
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+	if err := m.fetchJSON("/state", &state); err != nil {
 		return mockState{}, err
 	}
 	return state, nil
+}
+
+func (m *mockProcess) getJSON(t *testing.T, path string, out any) {
+	t.Helper()
+	if err := m.fetchJSON(path, out); err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+}
+
+func (m *mockProcess) fetchJSON(path string, out any) error {
+	resp, err := m.client.Get(m.HTTPBase + path)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", path, resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (m *mockProcess) dumpDiagnostics(t *testing.T) {
@@ -128,11 +162,59 @@ func (m *mockProcess) dumpDiagnostics(t *testing.T) {
 	} else {
 		t.Logf("mock /state unavailable: %v", err)
 	}
-	if b, err := os.ReadFile(m.LogPath); err == nil {
-		t.Logf("mockgrbl log:\n%s", b)
+	var responses []mockLogEntry
+	if err := m.fetchJSON("/responses", &responses); err == nil {
+		t.Logf("mock /responses: %+v", responses)
 	} else {
-		t.Logf("mockgrbl log unavailable: %v", err)
+		t.Logf("mock /responses unavailable: %v", err)
 	}
+	var events []mockLogEntry
+	if err := m.fetchJSON("/events", &events); err == nil {
+		t.Logf("mock /events: %+v", events)
+	} else {
+		t.Logf("mock /events unavailable: %v", err)
+	}
+	if b, err := os.ReadFile(m.LogPath); err == nil {
+		t.Logf("mockgrbl log %s:\n%s", m.LogPath, b)
+	} else {
+		t.Logf("mockgrbl log %s unavailable: %v", m.LogPath, err)
+	}
+}
+
+func waitForMockState(t *testing.T, m *mockProcess, timeout time.Duration, pred func(mockState) bool) mockState {
+	t.Helper()
+	var last mockState
+	var lastErr error
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		state, err := m.fetchState()
+		if err == nil {
+			last = state
+			if pred(state) {
+				return state
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("mock state condition not met within %s; last=%+v; lastErr=%v", timeout, last, lastErr)
+	return last
+}
+
+func waitForControllerState(t *testing.T, c *app.Controller, timeout time.Duration, pred func(app.State) bool) app.State {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last app.State
+	for time.Now().Before(deadline) {
+		last = c.Snapshot()
+		if pred(last) {
+			return last
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("controller state condition not met within %s; last=%+v", timeout, last)
+	return last
 }
 
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
@@ -306,6 +388,100 @@ observedMove:
 		snapshot := controller.Snapshot()
 		return snapshot.MachineState == "Idle" && snapshot.HasMachinePosition && near(snapshot.MachinePosition[0], final.MachinePosition[0], 0.25)
 	})
+}
+
+func TestDDGoJogToEndpointCompletesAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request baseline status: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.HasMachinePosition
+	})
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -1.0, 60); err != nil {
+		t.Fatalf("jog to endpoint: %v", err)
+	}
+
+	finalMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0 &&
+			near(state.MachinePosition[0], -1.0, posTol)
+	})
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request final status after mock state %+v: %v", finalMock, err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.HasMachinePosition &&
+			near(snapshot.MachinePosition[0], -1.0, posTol) &&
+			(snapshot.MachineState == "Idle" || snapshot.MachineState != "Jog")
+	})
+}
+
+func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request baseline status: %v", err)
+	}
+	baseline := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.HasMachinePosition
+	})
+	baselineX := baseline.MachinePosition[0]
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -999.0, 60); err != nil {
+		t.Logf("out-of-bounds JogTo returned write error: %v", err)
+	}
+
+	finalMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0 &&
+			near(state.MachinePosition[0], baselineX, posTol)
+	})
+	if finalMock.State == "Alarm" {
+		t.Fatalf("mock entered Alarm after rejected jog: %+v", finalMock)
+	}
+
+	responses := m.responses(t)
+	if !hasMockResponse(responses, "[MSG:jogLIM]") || !hasMockResponse(responses, "error:15") {
+		t.Fatalf("missing jog limit response; responses=%+v; events=%+v", responses, m.events(t))
+	}
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request final status after rejected jog: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], baselineX, posTol)
+	})
+}
+
+func hasMockResponse(entries []mockLogEntry, text string) bool {
+	for _, entry := range entries {
+		if entry.Kind == "response" && strings.Contains(entry.Text, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func near(got, want, tol float64) bool {
