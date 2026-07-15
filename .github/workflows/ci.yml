@@ -49,3 +49,13 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+      - name: Smoke test mockgrbl
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: scripts/ci_mockgrbl_smoke.sh
+
+      - name: Test mockgrbl integration
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: go test -tags 'serial mockgrbl_e2e' ./internal/integration/mockgrbl
