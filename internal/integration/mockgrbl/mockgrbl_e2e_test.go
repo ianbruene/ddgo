@@ -202,6 +202,28 @@ func waitForMockState(t *testing.T, m *mockProcess, timeout time.Duration, pred 
 	return last
 }
 
+func waitForMockResponses(t *testing.T, m *mockProcess, timeout time.Duration, pred func([]mockLogEntry) bool) []mockLogEntry {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []mockLogEntry
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var responses []mockLogEntry
+		err := m.fetchJSON("/responses", &responses)
+		if err == nil {
+			last = responses
+			if pred(responses) {
+				return responses
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("mock response condition not met within %s; last=%+v; lastErr=%v; events=%+v", timeout, last, lastErr, m.events(t))
+	return last
+}
+
 func waitForControllerState(t *testing.T, c *app.Controller, timeout time.Duration, pred func(app.State) bool) app.State {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -424,7 +446,7 @@ func TestDDGoJogToEndpointCompletesAgainstMock(t *testing.T) {
 	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
 		return snapshot.HasMachinePosition &&
 			near(snapshot.MachinePosition[0], -1.0, posTol) &&
-			(snapshot.MachineState == "Idle" || snapshot.MachineState != "Jog")
+			snapshot.MachineState == "Idle"
 	})
 }
 
@@ -448,6 +470,11 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 		t.Logf("out-of-bounds JogTo returned write error: %v", err)
 	}
 
+	responses := waitForMockResponses(t, m, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[MSG:jogLIM]") &&
+			hasMockResponse(responses, "error:15")
+	})
+
 	finalMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
 		return state.State == "Idle" &&
 			state.ActiveMove == nil &&
@@ -457,8 +484,6 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 	if finalMock.State == "Alarm" {
 		t.Fatalf("mock entered Alarm after rejected jog: %+v", finalMock)
 	}
-
-	responses := m.responses(t)
 	if !hasMockResponse(responses, "[MSG:jogLIM]") || !hasMockResponse(responses, "error:15") {
 		t.Fatalf("missing jog limit response; responses=%+v; events=%+v", responses, m.events(t))
 	}
