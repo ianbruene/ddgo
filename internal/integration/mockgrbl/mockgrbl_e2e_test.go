@@ -450,6 +450,112 @@ func TestDDGoJogToEndpointCompletesAgainstMock(t *testing.T) {
 	})
 }
 
+func TestDDGoQueuedAbsoluteJogSequencingAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request baseline status: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle"
+	})
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -1.0, 120); err != nil {
+		t.Fatalf("queue X absolute jog: %v", err)
+	}
+	if err := controller.JogTo(jogCtx, "Y", -1.0, 120); err != nil {
+		t.Fatalf("queue Y absolute jog: %v", err)
+	}
+	if err := controller.JogTo(jogCtx, "Z", -1.0, 120); err != nil {
+		t.Fatalf("queue Z absolute jog: %v", err)
+	}
+
+	finalMock := waitForMockState(t, m, 10*time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0 &&
+			near(state.MachinePosition[0], -1.0, posTol) &&
+			near(state.MachinePosition[1], -1.0, posTol) &&
+			near(state.MachinePosition[2], -1.0, posTol)
+	})
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request final status after mock state %+v: %v", finalMock, err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], -1.0, posTol) &&
+			near(snapshot.MachinePosition[1], -1.0, posTol) &&
+			near(snapshot.MachinePosition[2], -1.0, posTol)
+	})
+}
+
+func TestDDGoRealtimeResetDuringJogAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request baseline status: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], 0, posTol)
+	})
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -86.5, 60); err != nil {
+		t.Fatalf("start long absolute jog: %v", err)
+	}
+
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Jog" || state.ActiveMove != nil
+	})
+	moving := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		x := state.MachinePosition[0]
+		return x < -0.01 && x > -86.49
+	})
+
+	resetCtx, resetCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer resetCancel()
+	if err := controller.Action(resetCtx, grbl.ActionSoftReset); err != nil {
+		t.Fatalf("soft reset during moving state %+v: %v", moving, err)
+	}
+
+	finalMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0
+	})
+	if got := finalMock.MachinePosition[0]; got >= 0 || got <= -86.5 {
+		t.Fatalf("post-reset X = %v, want materialized position between 0 and -86.5; final=%+v", got, finalMock)
+	}
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request final status after reset state %+v: %v", finalMock, err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle"
+	})
+}
+
 func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMock(t, m)
