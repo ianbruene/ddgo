@@ -516,6 +516,79 @@ func TestDDGoQueuedAbsoluteJogSequencingAgainstMock(t *testing.T) {
 	})
 }
 
+func TestDDGoRealtimeHoldResumeDuringJogAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request baseline status: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], 0, posTol)
+	})
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -86.5, 60); err != nil {
+		t.Fatalf("start long absolute jog: %v", err)
+	}
+
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Jog" || state.ActiveMove != nil
+	})
+	moving := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		x := state.MachinePosition[0]
+		return x < -0.01 && x > -86.49
+	})
+
+	holdCtx, holdCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer holdCancel()
+	if err := controller.Action(holdCtx, grbl.ActionHold); err != nil {
+		t.Fatalf("feed hold during moving state %+v: %v", moving, err)
+	}
+
+	finalMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0
+	})
+	heldX := finalMock.MachinePosition[0]
+	if heldX >= 0 || heldX <= -86.5 {
+		t.Fatalf("held X = %v, want materialized position between 0 and -86.5; final=%+v", heldX, finalMock)
+	}
+	if events := m.events(t); !hasMockLogEntry(events, "command", "!") {
+		t.Fatalf("missing realtime hold command event; events=%+v", events)
+	}
+
+	resumeCtx, resumeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer resumeCancel()
+	if err := controller.Action(resumeCtx, grbl.ActionResume); err != nil {
+		t.Fatalf("resume after mock-cancelled jog: %v", err)
+	}
+	waitForMockState(t, m, time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0 &&
+			near(state.MachinePosition[0], heldX, posTol)
+	})
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request final status after hold/resume state %+v: %v", finalMock, err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], heldX, resetPosTol)
+	})
+}
+
 func TestDDGoRealtimeResetDuringJogAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMock(t, m)
@@ -575,6 +648,69 @@ func TestDDGoRealtimeResetDuringJogAgainstMock(t *testing.T) {
 	})
 }
 
+func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request baseline status: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.MachineState == "Idle" &&
+			snapshot.HasMachinePosition &&
+			near(snapshot.MachinePosition[0], 0, posTol)
+	})
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -3.0, 60); err != nil {
+		t.Fatalf("start status-report jog: %v", err)
+	}
+
+	movingMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		x := state.MachinePosition[0]
+		return state.State == "Jog" &&
+			state.ActiveMove != nil &&
+			x < -0.01 &&
+			x > -2.99
+	})
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request moving status after mock state %+v: %v", movingMock, err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		x := snapshot.MachinePosition[0]
+		return snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Jog" &&
+			x < -0.01 &&
+			x > -2.99 &&
+			snapshot.LastStatusRaw != ""
+	})
+
+	finalMock := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" &&
+			state.ActiveMove == nil &&
+			state.QueuedCommandCount == 0 &&
+			near(state.MachinePosition[0], -3.0, posTol)
+	})
+
+	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer statusCancel()
+	if err := controller.Action(statusCtx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request final status after mock state %+v: %v", finalMock, err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.MachineState == "Idle" &&
+			snapshot.HasMachinePosition &&
+			near(snapshot.MachinePosition[0], -3.0, posTol) &&
+			snapshot.LastStatusRaw != ""
+	})
+}
+
 func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMock(t, m)
@@ -623,6 +759,15 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 			snapshot.MachineState == "Idle" &&
 			near(snapshot.MachinePosition[0], baselineX, posTol)
 	})
+}
+
+func hasMockLogEntry(entries []mockLogEntry, kindContains, textContains string) bool {
+	for _, entry := range entries {
+		if strings.Contains(entry.Kind, kindContains) && strings.Contains(entry.Text, textContains) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasMockResponse(entries []mockLogEntry, text string) bool {
