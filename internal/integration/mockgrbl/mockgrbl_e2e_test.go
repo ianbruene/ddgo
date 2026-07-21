@@ -230,6 +230,51 @@ func waitForMockResponses(t *testing.T, m *mockProcess, timeout time.Duration, p
 	return last
 }
 
+func waitForMockEvents(t *testing.T, m *mockProcess, timeout time.Duration, pred func([]mockLogEntry) bool) []mockLogEntry {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []mockLogEntry
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var events []mockLogEntry
+		err := m.fetchJSON("/events", &events)
+		if err == nil {
+			last = events
+			if pred(events) {
+				return events
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("mock event condition not met within %s; last=%+v; lastErr=%v", timeout, last, lastErr)
+	return last
+}
+
+func assertMockStateRemains(t *testing.T, m *mockProcess, duration time.Duration, pred func(mockState) bool) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	var last mockState
+	var lastErr error
+	for time.Now().Before(deadline) {
+		state, err := m.fetchState()
+		if err != nil {
+			lastErr = err
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		last = state
+		if !pred(state) {
+			t.Fatalf("mock state changed during %s; state=%+v", duration, state)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if lastErr != nil && last.State == "" {
+		t.Fatalf("mock state unavailable during %s; lastErr=%v", duration, lastErr)
+	}
+}
+
 func waitForControllerState(t *testing.T, c *app.Controller, timeout time.Duration, pred func(app.State) bool) app.State {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -570,7 +615,10 @@ func TestDDGoRealtimeHoldResumeDuringJogAgainstMock(t *testing.T) {
 	if err := controller.Action(resumeCtx, grbl.ActionResume); err != nil {
 		t.Fatalf("resume after mock-cancelled jog: %v", err)
 	}
-	waitForMockState(t, m, time.Second, func(state mockState) bool {
+	waitForMockEvents(t, m, 2*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "~")
+	})
+	assertMockStateRemains(t, m, time.Second, func(state mockState) bool {
 		return state.State == "Idle" &&
 			state.ActiveMove == nil &&
 			state.QueuedCommandCount == 0 &&
@@ -665,7 +713,10 @@ func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
 
 	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer jogCancel()
-	if err := controller.JogTo(jogCtx, "X", -3.0, 60); err != nil {
+	const statusJogTarget = -3.0
+	const statusJogFeed = 60.0
+
+	if err := controller.JogTo(jogCtx, "X", statusJogTarget, statusJogFeed); err != nil {
 		t.Fatalf("start status-report jog: %v", err)
 	}
 
@@ -673,8 +724,8 @@ func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
 		x := state.MachinePosition[0]
 		return state.State == "Jog" &&
 			state.ActiveMove != nil &&
-			x < -0.01 &&
-			x > -2.99
+			x < -0.25 &&
+			x > -2.0
 	})
 
 	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
@@ -686,8 +737,8 @@ func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
 		x := snapshot.MachinePosition[0]
 		return snapshot.HasMachinePosition &&
 			snapshot.MachineState == "Jog" &&
-			x < -0.01 &&
-			x > -2.99 &&
+			x < -0.05 &&
+			x > -2.95 &&
 			snapshot.LastStatusRaw != ""
 	})
 
@@ -695,7 +746,7 @@ func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
 		return state.State == "Idle" &&
 			state.ActiveMove == nil &&
 			state.QueuedCommandCount == 0 &&
-			near(state.MachinePosition[0], -3.0, posTol)
+			near(state.MachinePosition[0], statusJogTarget, posTol)
 	})
 
 	statusCtx, statusCancel = context.WithTimeout(context.Background(), 2*time.Second)
@@ -706,7 +757,7 @@ func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
 	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
 		return snapshot.MachineState == "Idle" &&
 			snapshot.HasMachinePosition &&
-			near(snapshot.MachinePosition[0], -3.0, posTol) &&
+			near(snapshot.MachinePosition[0], statusJogTarget, posTol) &&
 			snapshot.LastStatusRaw != ""
 	})
 }
