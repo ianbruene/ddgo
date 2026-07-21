@@ -252,6 +252,90 @@ func waitForMockEvents(t *testing.T, m *mockProcess, timeout time.Duration, pred
 	return last
 }
 
+func mockResponseCount(t *testing.T, m *mockProcess) int {
+	t.Helper()
+	return len(m.responses(t))
+}
+
+func mockEventCount(t *testing.T, m *mockProcess) int {
+	t.Helper()
+	return len(m.events(t))
+}
+
+func waitForNewMockResponses(t *testing.T, m *mockProcess, after int, timeout time.Duration, pred func([]mockLogEntry) bool) []mockLogEntry {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastAll []mockLogEntry
+	var lastNew []mockLogEntry
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var responses []mockLogEntry
+		err := m.fetchJSON("/responses", &responses)
+		if err == nil {
+			lastAll = responses
+			if after <= len(responses) {
+				lastNew = responses[after:]
+			} else {
+				lastNew = nil
+			}
+			if pred(lastNew) {
+				return lastNew
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("new mock response condition not met within %s; after=%d; lastNew=%+v; lastAll=%+v; lastErr=%v", timeout, after, lastNew, lastAll, lastErr)
+	return lastNew
+}
+
+func waitForNewMockEvents(t *testing.T, m *mockProcess, after int, timeout time.Duration, pred func([]mockLogEntry) bool) []mockLogEntry {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastAll []mockLogEntry
+	var lastNew []mockLogEntry
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var events []mockLogEntry
+		err := m.fetchJSON("/events", &events)
+		if err == nil {
+			lastAll = events
+			if after <= len(events) {
+				lastNew = events[after:]
+			} else {
+				lastNew = nil
+			}
+			if pred(lastNew) {
+				return lastNew
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("new mock event condition not met within %s; after=%d; lastNew=%+v; lastAll=%+v; lastErr=%v", timeout, after, lastNew, lastAll, lastErr)
+	return lastNew
+}
+
+func requestStatus(t *testing.T, c *app.Controller) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.Action(ctx, grbl.ActionStatus); err != nil {
+		t.Fatalf("request status: %v", err)
+	}
+}
+
+func requireControllerIdle(t *testing.T, c *app.Controller) app.State {
+	t.Helper()
+	return waitForControllerState(t, c, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle"
+	})
+}
+
 func assertMockStateRemains(t *testing.T, m *mockProcess, duration time.Duration, pred func(mockState) bool) {
 	t.Helper()
 	deadline := time.Now().Add(duration)
@@ -394,6 +478,133 @@ func TestDDGoConnectsToMockAndReadsStatus(t *testing.T) {
 			t.Fatalf("initial machine position[%d] = %v, want near 0; snapshot=%+v", axis, got, snapshot)
 		}
 	}
+}
+
+func TestDDGoConsoleBuildInfoAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.SendConsoleLine(ctx, "$I"); err != nil {
+		t.Fatalf("send build-info console line: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") &&
+			hasMockResponse(responses, "GG:") &&
+			hasMockResponse(responses, "PCB:") &&
+			hasMockResponse(responses, "YMD:") &&
+			hasMockResponse(responses, "ok")
+	})
+	waitForMockEvents(t, m, 2*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$I")
+	})
+
+	if snapshot := controller.Snapshot(); !snapshot.Connected || snapshot.LastError != "" {
+		t.Fatalf("controller not healthy after build-info response: %+v", snapshot)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoUnlockAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.Action(ctx, grbl.ActionUnlock); err != nil {
+		t.Fatalf("unlock controller: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+	waitForNewMockEvents(t, m, eventsAfter, 2*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$X")
+	})
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoUnsupportedConsoleCommandAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	requestStatus(t, controller)
+	baseline := requireControllerIdle(t, controller)
+	baselineX := baseline.MachinePosition[0]
+	responsesAfter := mockResponseCount(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.SendConsoleLine(ctx, "G4 P0.1"); err != nil {
+		t.Fatalf("send unsupported console line: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "error:")
+	})
+
+	state := m.state(t)
+	if state.State != "Idle" || state.ActiveMove != nil || state.QueuedCommandCount != 0 || !near(state.MachinePosition[0], baselineX, posTol) {
+		t.Fatalf("mock unsafe after unsupported command; baselineX=%v; state=%+v", baselineX, state)
+	}
+
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], baselineX, posTol)
+	})
+}
+
+func TestDDGoConsoleResponsesAreNotConfusedByStatusPollingAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.LastStatusRaw != ""
+	})
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.SendConsoleLine(ctx, "$I"); err != nil {
+		t.Fatalf("send build-info console line while polling: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") &&
+			hasMockResponse(responses, "GG:") &&
+			hasMockResponse(responses, "PCB:") &&
+			hasMockResponse(responses, "YMD:") &&
+			hasMockResponse(responses, "ok")
+	})
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$I") &&
+			hasMockLogEntry(events, "command", "?")
+	})
+
+	if snapshot := controller.Snapshot(); !snapshot.Connected || !snapshot.HasMachinePosition || snapshot.MachineState == "" {
+		t.Fatalf("controller missing parsed status after console response during polling: %+v", snapshot)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
 }
 
 func TestDDGoJogToEndpointThenStopAgainstMock(t *testing.T) {
