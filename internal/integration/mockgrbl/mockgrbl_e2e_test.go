@@ -5,6 +5,7 @@ package mockgrbl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -56,7 +57,16 @@ const posTol = 0.05
 
 const resetPosTol = 0.25
 
+type mockGRBLOptions struct {
+	ResponseDelay time.Duration
+}
+
 func startMockGRBL(t *testing.T) *mockProcess {
+	t.Helper()
+	return startMockGRBLWithOptions(t, mockGRBLOptions{})
+}
+
+func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -80,7 +90,11 @@ func startMockGRBL(t *testing.T) *mockProcess {
 	t.Cleanup(func() { _ = logFile.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, bin, "-symlink", serialPath, "-http", httpAddr)
+	args := []string{"-symlink", serialPath, "-http", httpAddr}
+	if opts.ResponseDelay > 0 {
+		args = append(args, "-response-delay", opts.ResponseDelay.String())
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -335,6 +349,35 @@ func requestStatus(t *testing.T, c *app.Controller) {
 	defer cancel()
 	if err := c.Action(ctx, grbl.ActionStatus); err != nil {
 		t.Fatalf("request status: %v", err)
+	}
+}
+
+func waitForProgramStatus(t *testing.T, c *app.Controller, timeout time.Duration, status app.ProgramStatus) app.State {
+	t.Helper()
+	return waitForControllerState(t, c, timeout, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == status
+	})
+}
+
+func waitForActiveProgramProgress(t *testing.T, c *app.Controller, timeout time.Duration) app.State {
+	t.Helper()
+	return waitForControllerState(t, c, timeout, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramRunning &&
+			snapshot.ProgramComplete > 0 &&
+			snapshot.ProgramComplete < snapshot.ProgramTotal
+	})
+}
+
+func assertControllerStateRemains(t *testing.T, c *app.Controller, duration time.Duration, pred func(app.State) bool) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	var last app.State
+	for time.Now().Before(deadline) {
+		last = c.Snapshot()
+		if !pred(last) {
+			t.Fatalf("controller state changed during %s; state=%+v", duration, last)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -743,6 +786,163 @@ func TestDDGoConsoleResponseEventsDuringStatusPollingAgainstMock(t *testing.T) {
 	if snapshot := controller.Snapshot(); !snapshot.Connected || !snapshot.HasMachinePosition || snapshot.MachineState == "" {
 		t.Fatalf("controller missing parsed status after console response events during polling: %+v", snapshot)
 	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoManualControlsBlockedWhileProgramRunningAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeRepeatedGStateProgram(t, "active-blocking-program.gcode", 25)
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load active blocking program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start active blocking program: %v", err)
+	}
+	actionCtx, actionCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer actionCancel()
+
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramRunning &&
+			snapshot.ProgramTotal == 25 &&
+			snapshot.ProgramComplete < snapshot.ProgramTotal
+	})
+
+	if err := controller.JogTo(actionCtx, "X", -1, 120); !errors.Is(err, app.ErrProgramActive) {
+		t.Fatalf("JogTo while active error = %v, want %v", err, app.ErrProgramActive)
+	}
+	if err := controller.Action(actionCtx, grbl.ActionStatus); !errors.Is(err, app.ErrProgramActive) {
+		t.Fatalf("Action(status) while active error = %v, want %v", err, app.ErrProgramActive)
+	}
+	if err := controller.SendConsoleLine(actionCtx, "$I"); !errors.Is(err, app.ErrProgramActive) {
+		t.Fatalf("SendConsoleLine while active error = %v, want %v", err, app.ErrProgramActive)
+	}
+
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return countControllerEventText(events, app.ErrProgramActive.Error()) >= 3
+	})
+	newEvents := waitForNewMockEvents(t, m, eventsAfter, 200*time.Millisecond, func(events []mockLogEntry) bool { return true })
+	if hasAnyMockCommandContaining(newEvents, "$J=") {
+		t.Fatalf("manual jog reached mock while program active: %+v", newEvents)
+	}
+	if hasAnyMockCommandContaining(newEvents, "$I") {
+		t.Fatalf("manual console line reached mock while program active: %+v", newEvents)
+	}
+
+	waitForControllerState(t, controller, 10*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
+	})
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoStopProgramDuringActiveMockProgram(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeRepeatedGStateProgram(t, "stop-active-mock-program.gcode", 50)
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load stop active program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	_ = mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start stop active program: %v", err)
+	}
+	actionCtx, actionCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer actionCancel()
+
+	waitForActiveProgramProgress(t, controller, 5*time.Second)
+
+	if err := controller.StopProgram(actionCtx); err != nil {
+		t.Fatalf("stop active program: %v", err)
+	}
+	waitForProgramStatus(t, controller, 5*time.Second, app.ProgramStopped)
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "program stopped")
+	})
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "!")
+	})
+	state := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" && state.ActiveMove == nil && state.QueuedCommandCount == 0
+	})
+	if state.State != "Idle" || state.ActiveMove != nil || state.QueuedCommandCount != 0 {
+		t.Fatalf("mock unsafe after stop: %+v", state)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoPauseResumeActiveMockProgram(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeRepeatedGStateProgram(t, "pause-resume-active-mock-program.gcode", 50)
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load pause/resume program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	eventsAfter := mockEventCount(t, m)
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start pause/resume program: %v", err)
+	}
+	actionCtx, actionCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer actionCancel()
+	waitForActiveProgramProgress(t, controller, 5*time.Second)
+
+	if err := controller.PauseProgram(actionCtx); err != nil {
+		t.Fatalf("pause active program: %v", err)
+	}
+	waitForProgramStatus(t, controller, 5*time.Second, app.ProgramPaused)
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "!")
+	})
+
+	pausedComplete := controller.Snapshot().ProgramComplete
+	assertControllerStateRemains(t, controller, 300*time.Millisecond, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramPaused && snapshot.ProgramComplete == pausedComplete
+	})
+
+	if err := controller.ResumeProgram(actionCtx); err != nil {
+		t.Fatalf("resume paused program: %v", err)
+	}
+	waitForProgramStatus(t, controller, 5*time.Second, app.ProgramRunning)
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "~")
+	})
+	waitForControllerState(t, controller, 10*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
+	})
+
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }
@@ -1307,6 +1507,11 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 	})
 }
 
+func writeRepeatedGStateProgram(t *testing.T, name string, count int) string {
+	t.Helper()
+	return writeIntegrationProgramFile(t, name, repeatedProgramLine("$G", count))
+}
+
 func writeIntegrationProgramFile(t *testing.T, name string, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
@@ -1354,6 +1559,15 @@ func hasMockLogEntry(entries []mockLogEntry, kindContains, textContains string) 
 	return false
 }
 
+func hasAnyMockCommandContaining(entries []mockLogEntry, text string) bool {
+	for _, entry := range entries {
+		if entry.Kind == "command" && strings.Contains(entry.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
 func hasMockResponse(entries []mockLogEntry, text string) bool {
 	for _, entry := range entries {
 		if entry.Kind == "response" && strings.Contains(entry.Text, text) {
@@ -1361,6 +1575,16 @@ func hasMockResponse(entries []mockLogEntry, text string) bool {
 		}
 	}
 	return false
+}
+
+func countControllerEventText(events []app.Event, text string) int {
+	count := 0
+	for _, event := range events {
+		if strings.Contains(event.Text, text) {
+			count++
+		}
+	}
+	return count
 }
 
 func hasControllerEventText(events []app.Event, text string) bool {
