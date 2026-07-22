@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,16 @@ type mockLogEntry struct {
 	Time time.Time `json:"time"`
 	Kind string    `json:"kind"`
 	Text string    `json:"text"`
+}
+
+type controllerHarness struct {
+	Controller *app.Controller
+
+	mu     sync.Mutex
+	events []app.Event
+
+	stopEvents context.CancelFunc
+	drainDone  chan struct{}
 }
 
 const posTol = 0.05
@@ -434,7 +445,10 @@ func connectControllerToMock(t *testing.T, m *mockProcess) *app.Controller {
 			select {
 			case <-eventsCtx.Done():
 				return
-			case <-controller.Events():
+			case _, ok := <-controller.Events():
+				if !ok {
+					return
+				}
 			}
 		}
 	}()
@@ -453,6 +467,86 @@ func connectControllerToMock(t *testing.T, m *mockProcess) *app.Controller {
 	}
 	waitFor(t, 5*time.Second, func() bool { return controller.Snapshot().Connected })
 	return controller
+}
+
+func connectControllerToMockWithEvents(t *testing.T, m *mockProcess) *controllerHarness {
+	t.Helper()
+
+	h := &controllerHarness{
+		Controller: app.NewController(transport.NewSerialTransport(), nil),
+		drainDone:  make(chan struct{}),
+	}
+
+	eventsCtx, stopEvents := context.WithCancel(context.Background())
+	h.stopEvents = stopEvents
+
+	go func() {
+		defer close(h.drainDone)
+		for {
+			select {
+			case <-eventsCtx.Done():
+				return
+			case event, ok := <-h.Controller.Events():
+				if !ok {
+					return
+				}
+				h.mu.Lock()
+				h.events = append(h.events, event)
+				h.mu.Unlock()
+			}
+		}
+	}()
+
+	t.Cleanup(func() {
+		if err := h.Controller.Disconnect(); err != nil && h.Controller.Snapshot().Connected {
+			t.Logf("disconnect controller: %v", err)
+		}
+		h.stopEvents()
+		<-h.drainDone
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.Controller.Connect(ctx, transport.DefaultPortConfig(m.SerialPath)); err != nil {
+		t.Fatalf("connect controller to mock: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return h.Controller.Snapshot().Connected })
+	return h
+}
+
+func (h *controllerHarness) eventCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.events)
+}
+
+func (h *controllerHarness) eventsAfter(after int) []app.Event {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if after > len(h.events) {
+		return nil
+	}
+	out := make([]app.Event, len(h.events[after:]))
+	copy(out, h.events[after:])
+	return out
+}
+
+func (h *controllerHarness) waitForEventsAfter(t *testing.T, after int, timeout time.Duration, pred func([]app.Event) bool) []app.Event {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var last []app.Event
+	for time.Now().Before(deadline) {
+		last = h.eventsAfter(after)
+		if pred(last) {
+			return last
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	t.Fatalf("controller event condition not met within %s; after=%d; last=%+v", timeout, after, last)
+	return last
 }
 
 func TestDDGoConnectsToMockAndReadsStatus(t *testing.T) {
@@ -602,6 +696,52 @@ func TestDDGoConsoleResponsesAreNotConfusedByStatusPollingAgainstMock(t *testing
 
 	if snapshot := controller.Snapshot(); !snapshot.Connected || !snapshot.HasMachinePosition || snapshot.MachineState == "" {
 		t.Fatalf("controller missing parsed status after console response during polling: %+v", snapshot)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoConsoleResponseEventsDuringStatusPollingAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.LastStatusRaw != ""
+	})
+
+	controllerEventsAfter := h.eventCount()
+	mockResponsesAfter := mockResponseCount(t, m)
+	mockEventsAfter := mockEventCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.SendConsoleLine(ctx, "$I"); err != nil {
+		t.Fatalf("send build-info console line while polling: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, mockResponsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") &&
+			hasMockResponse(responses, "GG:") &&
+			hasMockResponse(responses, "PCB:") &&
+			hasMockResponse(responses, "YMD:") &&
+			hasMockResponse(responses, "ok")
+	})
+	waitForNewMockEvents(t, m, mockEventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$I") &&
+			hasMockLogEntry(events, "command", "?")
+	})
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "[grbl:") &&
+			hasControllerEventText(events, "GG:") &&
+			hasControllerEventText(events, "PCB:") &&
+			hasControllerEventText(events, "YMD:") &&
+			hasControllerEventText(events, "ok")
+	})
+
+	if snapshot := controller.Snapshot(); !snapshot.Connected || !snapshot.HasMachinePosition || snapshot.MachineState == "" {
+		t.Fatalf("controller missing parsed status after console response events during polling: %+v", snapshot)
 	}
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
@@ -1035,6 +1175,15 @@ func hasMockLogEntry(entries []mockLogEntry, kindContains, textContains string) 
 func hasMockResponse(entries []mockLogEntry, text string) bool {
 	for _, entry := range entries {
 		if entry.Kind == "response" && strings.Contains(entry.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasControllerEventText(events []app.Event, text string) bool {
+	for _, event := range events {
+		if strings.Contains(event.Text, text) {
 			return true
 		}
 	}
