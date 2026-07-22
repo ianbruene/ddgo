@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/ianbruene/ddgo/internal/mockgrbl"
 )
@@ -16,6 +17,7 @@ import (
 func main() {
 	symlink := flag.String("symlink", "/tmp/ddgo-mock-grbl", "stable symlink path")
 	httpAddr := flag.String("http", "127.0.0.1:8088", "debug HTTP address")
+	responseDelay := flag.Duration("response-delay", 0, "delay before writing each serial response line")
 	flag.Parse()
 	ctl := mockgrbl.NewController(mockgrbl.DefaultFirmwareProfile(), mockgrbl.DefaultMachineProfile(), nil)
 	ptm, slave, err := openPTY()
@@ -30,16 +32,12 @@ func main() {
 	log.Printf("mockgrbl serial path: %s", slave)
 	log.Printf("mockgrbl stable path: %s", *symlink)
 	go func() { log.Fatal(http.ListenAndServe(*httpAddr, mockgrbl.DebugHandler(ctl))) }()
-	for _, s := range ctl.Connect() {
-		_, _ = ptm.Write([]byte(s))
-	}
+	writeResponses(ptm, ctl.Connect(), *responseDelay)
 	buf := make([]byte, 256)
 	for {
 		n, err := ptm.Read(buf)
 		if n > 0 {
-			for _, s := range ctl.ProcessBytes(buf[:n]) {
-				_, _ = ptm.Write([]byte(s))
-			}
+			writeResponses(ptm, ctl.ProcessBytes(buf[:n]), *responseDelay)
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
@@ -51,5 +49,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			return
 		}
+	}
+}
+
+func writeResponses(w io.Writer, responses []string, delay time.Duration) {
+	for _, s := range responses {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		_, _ = w.Write([]byte(s))
 	}
 }
