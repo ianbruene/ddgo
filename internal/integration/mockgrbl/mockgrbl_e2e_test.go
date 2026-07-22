@@ -747,6 +747,136 @@ func TestDDGoConsoleResponseEventsDuringStatusPollingAgainstMock(t *testing.T) {
 	requireControllerIdle(t, controller)
 }
 
+func TestDDGoProgramSendAcceptedAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "accepted-mock-program.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load accepted program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start accepted program: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return countMockResponses(responses, "ok") >= 1
+	})
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G")
+	})
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "program accepted-mock-program.gcode completed")
+	})
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
+	})
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramSendUnsupportedLineAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "unsupported-mock-program.gcode", "G4 P0.1\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load unsupported program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	baseline := requireControllerIdle(t, controller)
+	baselineX := baseline.MachinePosition[0]
+	responsesAfter := mockResponseCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start unsupported program: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "error:")
+	})
+	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed && strings.Contains(snapshot.LastError, "program failed at line 1: error:")
+	})
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "program failed") && hasControllerEventText(events, "program failed at line 1: error:")
+	})
+
+	state := m.state(t)
+	if state.State != "Idle" || state.ActiveMove != nil || state.QueuedCommandCount != 0 || !near(state.MachinePosition[0], baselineX, posTol) {
+		t.Fatalf("mock unsafe after unsupported program; failed=%+v; baselineX=%v; state=%+v", failed, baselineX, state)
+	}
+
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.ProgramStatus == app.ProgramFailed &&
+			snapshot.HasMachinePosition &&
+			snapshot.MachineState == "Idle" &&
+			near(snapshot.MachinePosition[0], baselineX, posTol)
+	})
+}
+
+func TestDDGoProgramAcksAreNotConfusedByStatusPollingAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "polling-ack-mock-program.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load polling ack program: %v", err)
+	}
+
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected &&
+			snapshot.HasMachinePosition &&
+			snapshot.LastStatusRaw != ""
+	})
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start polling ack program: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return countMockResponses(responses, "ok") >= 1
+	})
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "?")
+	})
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "program polling-ack-mock-program.gcode completed")
+	})
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
+	})
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
 func TestDDGoJogToEndpointThenStopAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMock(t, m)
@@ -1161,6 +1291,25 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 			snapshot.MachineState == "Idle" &&
 			near(snapshot.MachinePosition[0], baselineX, posTol)
 	})
+}
+
+func writeIntegrationProgramFile(t *testing.T, name string, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write integration program: %v", err)
+	}
+	return path
+}
+
+func countMockResponses(entries []mockLogEntry, text string) int {
+	count := 0
+	for _, entry := range entries {
+		if entry.Kind == "response" && strings.Contains(entry.Text, text) {
+			count++
+		}
+	}
+	return count
 }
 
 func hasMockLogEntry(entries []mockLogEntry, kindContains, textContains string) bool {
