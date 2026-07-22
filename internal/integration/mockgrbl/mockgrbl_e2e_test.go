@@ -771,7 +771,8 @@ func TestDDGoProgramSendAcceptedAgainstMock(t *testing.T) {
 	}
 
 	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
-		return countMockResponses(responses, "ok") >= 1
+		return hasMockResponse(responses, "[GC:") &&
+			countMockResponses(responses, "ok") >= 1
 	})
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$G")
@@ -801,6 +802,7 @@ func TestDDGoProgramSendUnsupportedLineAgainstMock(t *testing.T) {
 	baseline := requireControllerIdle(t, controller)
 	baselineX := baseline.MachinePosition[0]
 	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
 	controllerEventsAfter := h.eventCount()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -811,6 +813,9 @@ func TestDDGoProgramSendUnsupportedLineAgainstMock(t *testing.T) {
 
 	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
 		return hasMockResponse(responses, "error:")
+	})
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G4P0.1")
 	})
 	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
 		return snapshot.ProgramStatus == app.ProgramFailed && strings.Contains(snapshot.LastError, "program failed at line 1: error:")
@@ -839,7 +844,12 @@ func TestDDGoProgramAcksAreNotConfusedByStatusPollingAgainstMock(t *testing.T) {
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
 
-	programPath := writeIntegrationProgramFile(t, "polling-ack-mock-program.gcode", "$G\n")
+	const pollingAckProgramLines = 50
+	programPath := writeIntegrationProgramFile(
+		t,
+		"polling-ack-mock-program.gcode",
+		repeatedProgramLine("$G", pollingAckProgramLines),
+	)
 	if err := controller.LoadProgramFile(programPath); err != nil {
 		t.Fatalf("load polling ack program: %v", err)
 	}
@@ -860,17 +870,21 @@ func TestDDGoProgramAcksAreNotConfusedByStatusPollingAgainstMock(t *testing.T) {
 		t.Fatalf("start polling ack program: %v", err)
 	}
 
-	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
-		return countMockResponses(responses, "ok") >= 1
+	waitForNewMockResponses(t, m, responsesAfter, 10*time.Second, func(responses []mockLogEntry) bool {
+		return countMockResponses(responses, "[GC:") >= pollingAckProgramLines &&
+			countMockResponses(responses, "ok") >= pollingAckProgramLines
 	})
-	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "?")
+	waitForNewMockEvents(t, m, eventsAfter, 10*time.Second, func(events []mockLogEntry) bool {
+		return countMockEvents(events, "command", "$G") >= pollingAckProgramLines &&
+			hasMockLogEntry(events, "command", "?")
 	})
-	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+	h.waitForEventsAfter(t, controllerEventsAfter, 10*time.Second, func(events []app.Event) bool {
 		return hasControllerEventText(events, "program polling-ack-mock-program.gcode completed")
 	})
-	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
-		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
+	waitForControllerState(t, controller, 10*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramCompleted &&
+			snapshot.ProgramComplete == snapshot.ProgramTotal &&
+			snapshot.ProgramTotal == pollingAckProgramLines
 	})
 
 	requestStatus(t, controller)
@@ -1302,10 +1316,29 @@ func writeIntegrationProgramFile(t *testing.T, name string, contents string) str
 	return path
 }
 
+func repeatedProgramLine(line string, count int) string {
+	var b strings.Builder
+	for i := 0; i < count; i++ {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func countMockResponses(entries []mockLogEntry, text string) int {
 	count := 0
 	for _, entry := range entries {
 		if entry.Kind == "response" && strings.Contains(entry.Text, text) {
+			count++
+		}
+	}
+	return count
+}
+
+func countMockEvents(entries []mockLogEntry, kindContains, textContains string) int {
+	count := 0
+	for _, entry := range entries {
+		if strings.Contains(entry.Kind, kindContains) && strings.Contains(entry.Text, textContains) {
 			count++
 		}
 	}
