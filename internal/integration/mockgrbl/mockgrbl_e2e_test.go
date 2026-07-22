@@ -413,6 +413,47 @@ func assertMockStateRemains(t *testing.T, m *mockProcess, duration time.Duration
 	}
 }
 
+func assertNoNewMockCommandContainingFor(t *testing.T, m *mockProcess, after int, duration time.Duration, forbidden ...string) {
+	t.Helper()
+
+	deadline := time.Now().Add(duration)
+	var lastNew []mockLogEntry
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		var events []mockLogEntry
+		err := m.fetchJSON("/events", &events)
+		if err != nil {
+			lastErr = err
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+
+		if after <= len(events) {
+			lastNew = events[after:]
+		} else {
+			lastNew = nil
+		}
+
+		for _, entry := range lastNew {
+			if entry.Kind != "command" {
+				continue
+			}
+			for _, text := range forbidden {
+				if strings.Contains(entry.Text, text) {
+					t.Fatalf("forbidden mock command %q observed during %s; events=%+v", text, duration, lastNew)
+				}
+			}
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if lastErr != nil && lastNew == nil {
+		t.Fatalf("mock events unavailable while checking forbidden commands during %s; lastErr=%v", duration, lastErr)
+	}
+}
+
 func waitForControllerState(t *testing.T, c *app.Controller, timeout time.Duration, pred func(app.State) bool) app.State {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -833,13 +874,7 @@ func TestDDGoManualControlsBlockedWhileProgramRunningAgainstMock(t *testing.T) {
 	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
 		return countControllerEventText(events, app.ErrProgramActive.Error()) >= 3
 	})
-	newEvents := waitForNewMockEvents(t, m, eventsAfter, 200*time.Millisecond, func(events []mockLogEntry) bool { return true })
-	if hasAnyMockCommandContaining(newEvents, "$J=") {
-		t.Fatalf("manual jog reached mock while program active: %+v", newEvents)
-	}
-	if hasAnyMockCommandContaining(newEvents, "$I") {
-		t.Fatalf("manual console line reached mock while program active: %+v", newEvents)
-	}
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$J=", "$I")
 
 	waitForControllerState(t, controller, 10*time.Second, func(snapshot app.State) bool {
 		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
@@ -928,8 +963,12 @@ func TestDDGoPauseResumeActiveMockProgram(t *testing.T) {
 	})
 
 	pausedComplete := controller.Snapshot().ProgramComplete
+	// One line may already be in flight when PauseProgram sends feed hold. Allow
+	// that acknowledgement to land, but require the sender to stop advancing after it.
 	assertControllerStateRemains(t, controller, 300*time.Millisecond, func(snapshot app.State) bool {
-		return snapshot.ProgramStatus == app.ProgramPaused && snapshot.ProgramComplete == pausedComplete
+		return snapshot.ProgramStatus == app.ProgramPaused &&
+			snapshot.ProgramComplete >= pausedComplete &&
+			snapshot.ProgramComplete <= pausedComplete+1
 	})
 
 	if err := controller.ResumeProgram(actionCtx); err != nil {
@@ -1553,15 +1592,6 @@ func countMockEvents(entries []mockLogEntry, kindContains, textContains string) 
 func hasMockLogEntry(entries []mockLogEntry, kindContains, textContains string) bool {
 	for _, entry := range entries {
 		if strings.Contains(entry.Kind, kindContains) && strings.Contains(entry.Text, textContains) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasAnyMockCommandContaining(entries []mockLogEntry, text string) bool {
-	for _, entry := range entries {
-		if entry.Kind == "command" && strings.Contains(entry.Text, text) {
 			return true
 		}
 	}
