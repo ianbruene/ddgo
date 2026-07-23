@@ -883,6 +883,214 @@ func TestDDGoManualControlsBlockedWhileProgramRunningAgainstMock(t *testing.T) {
 	requireControllerIdle(t, controller)
 }
 
+func TestDDGoStartProgramWithoutLoadedProgramAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := controller.StartProgram(ctx)
+	if err == nil || !strings.Contains(err.Error(), "load a program before starting") {
+		t.Fatalf("StartProgram() error = %v, want containing %q", err, "load a program before starting")
+	}
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "load a program before starting")
+
+	snapshot := controller.Snapshot()
+	if snapshot.ProgramStatus != app.ProgramNotLoaded || !snapshot.Connected || snapshot.MachineState != "Idle" {
+		t.Fatalf("controller state after rejected start = %+v, want connected idle with no loaded program", snapshot)
+	}
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G", "$J=", "G4")
+}
+
+func TestDDGoStartProgramWhileRunningAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeRepeatedGStateProgram(t, "double-start-running-program.gcode", 25)
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load double-start program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start double-start program: %v", err)
+	}
+	waitForActiveProgramProgress(t, controller, 5*time.Second)
+
+	progressBefore := controller.Snapshot().ProgramComplete
+	controllerEventsAfter := h.eventCount()
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer secondCancel()
+	err := controller.StartProgram(secondCtx)
+	if err == nil || !strings.Contains(err.Error(), "program is already running") {
+		t.Fatalf("second StartProgram() error = %v, want containing %q", err, "program is already running")
+	}
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "program is already running")
+
+	waitForControllerState(t, controller, 300*time.Millisecond, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramRunning &&
+			snapshot.ProgramComplete >= progressBefore &&
+			snapshot.ProgramComplete < snapshot.ProgramTotal
+	})
+
+	waitForProgramStatus(t, controller, 10*time.Second, app.ProgramCompleted)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoLoadProgramWhileRunningAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	initialPath := writeRepeatedGStateProgram(t, "initial-running-program.gcode", 25)
+	replacementPath := writeRepeatedGStateProgram(t, "replacement-program.gcode", 1)
+	if err := controller.LoadProgramFile(initialPath); err != nil {
+		t.Fatalf("load initial program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start initial program: %v", err)
+	}
+	waitForActiveProgramProgress(t, controller, 5*time.Second)
+
+	before := controller.Snapshot()
+	controllerEventsAfter := h.eventCount()
+
+	err := controller.LoadProgramFile(replacementPath)
+	if !errors.Is(err, app.ErrProgramActive) {
+		t.Fatalf("LoadProgramFile() while running error = %v, want %v", err, app.ErrProgramActive)
+	}
+	requireProgramErrorEvent(t, h, controllerEventsAfter, app.ErrProgramActive.Error())
+
+	snapshot := controller.Snapshot()
+	if snapshot.ProgramName != "initial-running-program.gcode" ||
+		snapshot.ProgramPath != initialPath ||
+		snapshot.ProgramTotal != 25 ||
+		snapshot.ProgramComplete < before.ProgramComplete ||
+		!programStatusIsAny(snapshot.ProgramStatus, app.ProgramRunning, app.ProgramCompleted) {
+		t.Fatalf("controller state after rejected load = %+v, before=%+v", snapshot, before)
+	}
+
+	waitForProgramStatus(t, controller, 10*time.Second, app.ProgramCompleted)
+	final := controller.Snapshot()
+	if final.ProgramName != "initial-running-program.gcode" || final.ProgramPath != initialPath || final.ProgramTotal != 25 {
+		t.Fatalf("final program metadata = %+v, want initial program", final)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoDisconnectWhileProgramRunningAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeRepeatedGStateProgram(t, "disconnect-running-program.gcode", 25)
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load disconnect-running program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start disconnect-running program: %v", err)
+	}
+	waitForActiveProgramProgress(t, controller, 5*time.Second)
+
+	before := controller.Snapshot()
+	controllerEventsAfter := h.eventCount()
+
+	err := controller.Disconnect()
+	if !errors.Is(err, app.ErrProgramActive) {
+		t.Fatalf("Disconnect() while running error = %v, want %v", err, app.ErrProgramActive)
+	}
+	requireProgramErrorEvent(t, h, controllerEventsAfter, app.ErrProgramActive.Error())
+
+	snapshot := controller.Snapshot()
+	if !snapshot.Connected ||
+		snapshot.PortName == "" ||
+		snapshot.ProgramComplete < before.ProgramComplete ||
+		!programStatusIsAny(snapshot.ProgramStatus, app.ProgramRunning, app.ProgramCompleted) {
+		t.Fatalf("controller state after rejected disconnect = %+v, before=%+v", snapshot, before)
+	}
+
+	waitForProgramStatus(t, controller, 10*time.Second, app.ProgramCompleted)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramFailureThenSuccessfulRunAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	failingPath := writeIntegrationProgramFile(t, "failing-program.gcode", "G4 P0.1\n")
+	if err := controller.LoadProgramFile(failingPath); err != nil {
+		t.Fatalf("load failing program: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start failing program: %v", err)
+	}
+
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, "program failed at line 1: error:")
+	})
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	successPath := writeIntegrationProgramFile(t, "success-after-failure.gcode", "$G\n")
+	if err := controller.LoadProgramFile(successPath); err != nil {
+		t.Fatalf("load success-after-failure program: %v", err)
+	}
+	requireLoadedProgram(t, controller, "success-after-failure.gcode", 1)
+
+	responsesAfter := mockResponseCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	successCtx, successCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer successCancel()
+	if err := controller.StartProgram(successCtx); err != nil {
+		t.Fatalf("start success-after-failure program: %v", err)
+	}
+
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[GC:") &&
+			hasMockResponse(responses, "ok")
+	})
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "program success-after-failure.gcode completed")
+	})
+	requireProgramCompleted(t, controller, 1)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
 func TestDDGoStopProgramDuringActiveMockProgram(t *testing.T) {
 	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
 	h := connectControllerToMockWithEvents(t, m)
@@ -1615,6 +1823,44 @@ func countControllerEventText(events []app.Event, text string) int {
 		}
 	}
 	return count
+}
+
+func requireProgramErrorEvent(t *testing.T, h *controllerHarness, after int, text string) {
+	t.Helper()
+	h.waitForEventsAfter(t, after, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, text)
+	})
+}
+
+func requireLoadedProgram(t *testing.T, c *app.Controller, name string, total int) {
+	t.Helper()
+	snapshot := c.Snapshot()
+	if snapshot.ProgramStatus != app.ProgramLoaded ||
+		snapshot.ProgramName != name ||
+		snapshot.ProgramTotal != total ||
+		snapshot.ProgramComplete != 0 ||
+		snapshot.LastError != "" {
+		t.Fatalf("loaded program state = %+v, want loaded %q with %d lines and no error", snapshot, name, total)
+	}
+}
+
+func requireProgramCompleted(t *testing.T, c *app.Controller, total int) {
+	t.Helper()
+	waitForControllerState(t, c, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramCompleted &&
+			snapshot.ProgramComplete == snapshot.ProgramTotal &&
+			snapshot.ProgramTotal == total &&
+			snapshot.LastError == ""
+	})
+}
+
+func programStatusIsAny(status app.ProgramStatus, allowed ...app.ProgramStatus) bool {
+	for _, candidate := range allowed {
+		if status == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func hasControllerEventText(events []app.Event, text string) bool {
