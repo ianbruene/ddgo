@@ -126,6 +126,27 @@ func TestBuildInfoIsGrblDDShaped(t *testing.T) {
 	}
 }
 
+func TestWCSOffsetsQuery(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte("$#\n")))
+	if !strings.Contains(out, "[G54:0.000,0.000,0.000]\r\n") || !strings.Contains(out, "[G59:0.000,0.000,0.000]\r\n") {
+		t.Fatalf("WCS response missing offsets: %q", out)
+	}
+	if !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("WCS response should end in ok: %q", out)
+	}
+	snap := c.Snapshot()
+	if snap.LastCommand != "$#" {
+		t.Fatalf("LastCommand = %q, want $#", snap.LastCommand)
+	}
+	if len(c.commands) == 0 || c.commands[len(c.commands)-1].Text != "$#" {
+		t.Fatalf("$# not logged as command: %+v", c.commands)
+	}
+	if len(c.responses) < 7 || c.responses[len(c.responses)-1].Text != "ok" {
+		t.Fatalf("unexpected response log: %+v", c.responses)
+	}
+}
+
 func TestMalformedAndHardLimit(t *testing.T) {
 	c, _ := testCtl()
 	out := joined(c.ProcessBytes([]byte("G2 X1\n")))
