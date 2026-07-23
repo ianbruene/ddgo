@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/ianbruene/ddgo/internal/app"
+	"github.com/ianbruene/ddgo/internal/gcode"
 	"github.com/ianbruene/ddgo/internal/grbl"
+	"github.com/ianbruene/ddgo/internal/macro"
 	"github.com/ianbruene/ddgo/internal/transport"
 )
 
@@ -56,6 +58,14 @@ type controllerHarness struct {
 const posTol = 0.05
 
 const resetPosTol = 0.25
+
+type programQueryRewriter struct {
+	fn func(context.Context, macro.Runtime, gcode.Line) (string, bool, error)
+}
+
+func (r programQueryRewriter) RewriteMotion(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+	return r.fn(ctx, runtime, line)
+}
 
 type mockGRBLOptions struct {
 	ResponseDelay time.Duration
@@ -1190,6 +1200,195 @@ func TestDDGoPauseResumeActiveMockProgram(t *testing.T) {
 		return snapshot.ProgramStatus == app.ProgramCompleted && snapshot.ProgramComplete == snapshot.ProgramTotal
 	})
 
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramQueryCollectsWCSOffsetsAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	var offsets macro.WCSOffsets
+	var queryErr error
+	queryDone := make(chan struct{}, 1)
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		offsets, queryErr = runtime.ReadWCSOffsets(ctx)
+		queryDone <- struct{}{}
+		return line.Text, false, queryErr
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-query-wcs.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load program query WCS program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start program query WCS program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$#") && hasMockLogEntry(events, "command", "$G")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[G54:") && hasMockResponse(responses, "[GC:") && countMockResponses(responses, "ok") >= 2
+	})
+	select {
+	case <-queryDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("program query did not complete")
+	}
+	if queryErr != nil {
+		t.Fatalf("ReadWCSOffsets() error = %v", queryErr)
+	}
+	if offsets == nil {
+		t.Fatal("ReadWCSOffsets() returned nil offsets")
+	}
+	if got, ok := offsets[macro.WCS("G54")]; !ok || got != (macro.Point{}) {
+		t.Fatalf("G54 offset = %+v, %v; want zero point", got, ok)
+	}
+
+	requireProgramCompleted(t, controller, 1)
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "program program-query-wcs.gcode completed")
+	})
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramQueryFailureFailsProgramAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		_, err := runtime.SendLineCollectingResponses(ctx, "G4 P0.1")
+		return line.Text, false, err
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-query-fail.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load program query failure program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start program query failure program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G4P0.1")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "error:")
+	})
+	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, "rewrite line") &&
+			strings.Contains(snapshot.LastError, "query command failed: error:")
+	})
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "query command failed: error:")
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G")
+
+	requestStatus(t, controller)
+	idle := requireControllerIdle(t, controller)
+	if idle.ProgramStatus != app.ProgramFailed {
+		t.Fatalf("final status = %+v after failure %+v, want ProgramFailed", idle, failed)
+	}
+}
+
+func TestDDGoProgramQueryRequiresActiveRunAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	eventsAfter := mockEventCount(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := controller.SendLineCollectingResponses(ctx, "$#"); err == nil || !strings.Contains(err.Error(), "no active program run") {
+		t.Fatalf("SendLineCollectingResponses() error = %v, want no active program run", err)
+	}
+	if _, err := controller.ReadWCSOffsets(ctx); err == nil || !strings.Contains(err.Error(), "no active program run") {
+		t.Fatalf("ReadWCSOffsets() error = %v, want no active program run", err)
+	}
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$#")
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoConcurrentProgramQueriesRejectedAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	eventsAfter := 0
+	secondErrCh := make(chan error, 1)
+	firstErrCh := make(chan error, 1)
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		go func() {
+			_, err := runtime.SendLineCollectingResponses(ctx, "$#")
+			firstErrCh <- err
+		}()
+		waitForNewMockEvents(t, m, eventsAfter, 2*time.Second, func(events []mockLogEntry) bool {
+			return hasMockLogEntry(events, "command", "$#")
+		})
+		_, secondErr := runtime.SendLineCollectingResponses(ctx, "$G")
+		secondErrCh <- secondErr
+		select {
+		case firstErr := <-firstErrCh:
+			if firstErr != nil {
+				return line.Text, false, firstErr
+			}
+		case <-time.After(5 * time.Second):
+			return line.Text, false, errors.New("first query did not finish")
+		}
+		return line.Text, false, nil
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-query-concurrent.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load concurrent query program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	eventsAfter = mockEventCount(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start concurrent query program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$#") && hasMockLogEntry(events, "command", "$G")
+	})
+	select {
+	case secondErr := <-secondErrCh:
+		if !errors.Is(secondErr, app.ErrProgramQueryActive) {
+			t.Fatalf("second query error = %v, want ErrProgramQueryActive", secondErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second query did not complete")
+	}
+	requireProgramCompleted(t, controller, 1)
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }

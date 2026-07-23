@@ -196,10 +196,25 @@ func (c *Controller) handleLine(raw string) []string {
 		return c.emit(c.fw.BuildInfo() + c.fw.LineEnding + c.fw.OK())
 	case "$G":
 		return c.emit("[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]" + c.fw.LineEnding + c.fw.OK())
+	case "$#":
+		return c.emit(c.wcsOffsetsResponse())
 	default:
 		return c.errorLine(norm, "Unsupported", 20)
 	}
 }
+func (c *Controller) wcsOffsetsResponse() string {
+	lines := []string{
+		"[G54:0.000,0.000,0.000]",
+		"[G55:0.000,0.000,0.000]",
+		"[G56:0.000,0.000,0.000]",
+		"[G57:0.000,0.000,0.000]",
+		"[G58:0.000,0.000,0.000]",
+		"[G59:0.000,0.000,0.000]",
+		c.fw.OK(),
+	}
+	return strings.Join(lines, c.fw.LineEnding)
+}
+
 func (c *Controller) handleJog(norm string) []string {
 	if c.state == StateAlarm {
 		return c.errorLine(norm, "Busy", 9)
