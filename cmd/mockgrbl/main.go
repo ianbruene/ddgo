@@ -18,6 +18,7 @@ func main() {
 	symlink := flag.String("symlink", "/tmp/ddgo-mock-grbl", "stable symlink path")
 	httpAddr := flag.String("http", "127.0.0.1:8088", "debug HTTP address")
 	responseDelay := flag.Duration("response-delay", 0, "delay before writing each serial response line")
+	suppressResponseFor := flag.String("suppress-response-for", "", "normalized line command whose serial responses should be suppressed")
 	flag.Parse()
 	ctl := mockgrbl.NewController(mockgrbl.DefaultFirmwareProfile(), mockgrbl.DefaultMachineProfile(), nil)
 	ptm, slave, err := openPTY()
@@ -37,7 +38,16 @@ func main() {
 	for {
 		n, err := ptm.Read(buf)
 		if n > 0 {
-			writeResponses(ptm, ctl.ProcessBytes(buf[:n]), *responseDelay)
+			for _, b := range buf[:n] {
+				eventsBefore := len(ctl.Events())
+				responses := ctl.ProcessBytes([]byte{b})
+				events := ctl.Events()
+				if shouldSuppressResponses(events[eventsBefore:], *suppressResponseFor) {
+					ctl.DiscardResponseLogs(responses)
+					continue
+				}
+				writeResponses(ptm, responses, *responseDelay)
+			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
@@ -59,4 +69,16 @@ func writeResponses(w io.Writer, responses []string, delay time.Duration) {
 		}
 		_, _ = w.Write([]byte(s))
 	}
+}
+
+func shouldSuppressResponses(events []mockgrbl.LogEntry, command string) bool {
+	if command == "" {
+		return false
+	}
+	for _, event := range events {
+		if event.Kind == "command" && event.Text == command {
+			return true
+		}
+	}
+	return false
 }

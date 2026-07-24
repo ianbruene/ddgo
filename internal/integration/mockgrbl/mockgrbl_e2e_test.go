@@ -68,7 +68,8 @@ func (r programQueryRewriter) RewriteMotion(ctx context.Context, runtime macro.R
 }
 
 type mockGRBLOptions struct {
-	ResponseDelay time.Duration
+	ResponseDelay       time.Duration
+	SuppressResponseFor string
 }
 
 func startMockGRBL(t *testing.T) *mockProcess {
@@ -103,6 +104,9 @@ func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 	args := []string{"-symlink", serialPath, "-http", httpAddr}
 	if opts.ResponseDelay > 0 {
 		args = append(args, "-response-delay", opts.ResponseDelay.String())
+	}
+	if opts.SuppressResponseFor != "" {
+		args = append(args, "-suppress-response-for", opts.SuppressResponseFor)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = logFile
@@ -489,6 +493,47 @@ func assertNoNewMockCommandContainingFor(t *testing.T, m *mockProcess, after int
 
 	if lastErr != nil && lastNew == nil {
 		t.Fatalf("mock events unavailable while checking forbidden commands during %s; lastErr=%v", duration, lastErr)
+	}
+}
+
+func assertNoNewMockResponseContainingFor(t *testing.T, m *mockProcess, after int, duration time.Duration, forbidden ...string) {
+	t.Helper()
+
+	deadline := time.Now().Add(duration)
+	var lastNew []mockLogEntry
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		var responses []mockLogEntry
+		err := m.fetchJSON("/responses", &responses)
+		if err != nil {
+			lastErr = err
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+
+		if after <= len(responses) {
+			lastNew = responses[after:]
+		} else {
+			lastNew = nil
+		}
+
+		for _, entry := range lastNew {
+			if entry.Kind != "response" {
+				continue
+			}
+			for _, text := range forbidden {
+				if strings.Contains(entry.Text, text) {
+					t.Fatalf("forbidden mock response %q observed during %s; responses=%+v", text, duration, lastNew)
+				}
+			}
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if lastErr != nil && lastNew == nil {
+		t.Fatalf("mock responses unavailable while checking forbidden responses during %s; lastErr=%v", duration, lastErr)
 	}
 }
 
@@ -1417,6 +1462,138 @@ func TestDDGoProgramControlsRejectAfterStopAgainstMock(t *testing.T) {
 	assertNoProgramRealtimeFor(t, m, eventsAfter, 300*time.Millisecond)
 }
 
+func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$G"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "program-missing-ack.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load missing ack program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	eventsAfter := mockEventCount(t, m)
+	responsesAfter := mockResponseCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start missing ack program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G")
+	})
+	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 500*time.Millisecond, "[GC:", "ok")
+	failed := requireProgramFailedWithError(t, controller, "context deadline exceeded")
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "context deadline exceeded")
+
+	requestStatus(t, controller)
+	idle := requireControllerIdle(t, controller)
+	if !idle.Connected || idle.MachineState != "Idle" || idle.ProgramStatus != app.ProgramFailed {
+		t.Fatalf("final status = %+v after failure %+v, want connected idle ProgramFailed", idle, failed)
+	}
+}
+
+func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$G"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	failingPath := writeIntegrationProgramFile(t, "program-timeout-failure.gcode", "$G\n")
+	if err := controller.LoadProgramFile(failingPath); err != nil {
+		t.Fatalf("load timeout failure program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start timeout failure program: %v", err)
+	}
+	requireProgramFailedWithError(t, controller, "context deadline exceeded")
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	recoveryPath := writeIntegrationProgramFile(t, "program-timeout-recovery.gcode", "$I\n")
+	if err := controller.LoadProgramFile(recoveryPath); err != nil {
+		t.Fatalf("load timeout recovery program: %v", err)
+	}
+	requireLoadedProgram(t, controller, "program-timeout-recovery.gcode", 1)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer recoveryCancel()
+	if err := controller.StartProgram(recoveryCtx); err != nil {
+		t.Fatalf("start timeout recovery program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$I")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 1)
+	requestStatus(t, controller)
+	idle := requireControllerIdle(t, controller)
+	if !idle.Connected || idle.MachineState != "Idle" || idle.LastError != "" {
+		t.Fatalf("final recovery status = %+v, want connected idle with no error", idle)
+	}
+}
+
+func TestDDGoProgramQueryFailsWhenResponseIsMissingAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$#"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		_, err := runtime.ReadWCSOffsets(ctx)
+		return line.Text, false, err
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-query-missing-response.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load query missing response program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start query missing response program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$#")
+	})
+	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 500*time.Millisecond, "[G54:", "ok")
+	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, "rewrite line") &&
+			strings.Contains(snapshot.LastError, "context deadline exceeded")
+	})
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "context deadline exceeded")
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G")
+
+	requestStatus(t, controller)
+	idle := requireControllerIdle(t, controller)
+	if idle.ProgramStatus != app.ProgramFailed {
+		t.Fatalf("final status = %+v after failure %+v, want ProgramFailed", idle, failed)
+	}
+}
+
 func TestDDGoProgramQueryCollectsWCSOffsetsAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	h := connectControllerToMockWithEvents(t, m)
@@ -2279,6 +2456,14 @@ func requireLoadedProgram(t *testing.T, c *app.Controller, name string, total in
 		snapshot.LastError != "" {
 		t.Fatalf("loaded program state = %+v, want loaded %q with %d lines and no error", snapshot, name, total)
 	}
+}
+
+func requireProgramFailedWithError(t *testing.T, c *app.Controller, text string) app.State {
+	t.Helper()
+	return waitForControllerState(t, c, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, text)
+	})
 }
 
 func requireProgramCompleted(t *testing.T, c *app.Controller, total int) {
