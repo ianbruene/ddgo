@@ -353,6 +353,34 @@ func waitForNewMockEvents(t *testing.T, m *mockProcess, after int, timeout time.
 	return lastNew
 }
 
+func waitForNewMockEventsErr(m *mockProcess, after int, timeout time.Duration, pred func([]mockLogEntry) bool) error {
+	deadline := time.Now().Add(timeout)
+	var lastAll []mockLogEntry
+	var lastNew []mockLogEntry
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		var events []mockLogEntry
+		err := m.fetchJSON("/events", &events)
+		if err == nil {
+			lastAll = events
+			if after <= len(events) {
+				lastNew = events[after:]
+			} else {
+				lastNew = nil
+			}
+			if pred(lastNew) {
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	return fmt.Errorf("new mock event condition not met within %s; after=%d; lastNew=%+v; lastAll=%+v; lastErr=%v", timeout, after, lastNew, lastAll, lastErr)
+}
+
 func requestStatus(t *testing.T, c *app.Controller) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1347,9 +1375,11 @@ func TestDDGoConcurrentProgramQueriesRejectedAgainstMock(t *testing.T) {
 			_, err := runtime.SendLineCollectingResponses(ctx, "$#")
 			firstErrCh <- err
 		}()
-		waitForNewMockEvents(t, m, eventsAfter, 2*time.Second, func(events []mockLogEntry) bool {
+		if err := waitForNewMockEventsErr(m, eventsAfter, 2*time.Second, func(events []mockLogEntry) bool {
 			return hasMockLogEntry(events, "command", "$#")
-		})
+		}); err != nil {
+			return line.Text, false, err
+		}
 		_, secondErr := runtime.SendLineCollectingResponses(ctx, "$G")
 		secondErrCh <- secondErr
 		select {
@@ -1378,7 +1408,7 @@ func TestDDGoConcurrentProgramQueriesRejectedAgainstMock(t *testing.T) {
 	}
 
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "$#") && hasMockLogEntry(events, "command", "$G")
+		return hasMockLogEntry(events, "command", "$#")
 	})
 	select {
 	case secondErr := <-secondErrCh:
@@ -1389,6 +1419,16 @@ func TestDDGoConcurrentProgramQueriesRejectedAgainstMock(t *testing.T) {
 		t.Fatal("second query did not complete")
 	}
 	requireProgramCompleted(t, controller, 1)
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return countMockEvents(events, "command", "$#") >= 1 &&
+			countMockEvents(events, "command", "$G") >= 1
+	})
+	if got := countMockEvents(events, "command", "$#"); got != 1 {
+		t.Fatalf("mock saw %d $# commands, want exactly one active query; events=%+v", got, events)
+	}
+	if got := countMockEvents(events, "command", "$G"); got != 1 {
+		t.Fatalf("mock saw %d $G commands, want exactly one original program line; events=%+v", got, events)
+	}
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }
