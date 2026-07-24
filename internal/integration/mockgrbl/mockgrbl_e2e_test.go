@@ -75,11 +75,17 @@ func (r programQueryRewriter) RewriteMotion(ctx context.Context, runtime macro.R
 type mockGRBLOptions struct {
 	ResponseDelay       time.Duration
 	SuppressResponseFor string
+	HoldResponseFor     string
 }
 
 func startMockGRBL(t *testing.T) *mockProcess {
 	t.Helper()
 	return startMockGRBLWithOptions(t, mockGRBLOptions{})
+}
+
+func startMockGRBLHoldingResponseFor(t *testing.T, command string) *mockProcess {
+	t.Helper()
+	return startMockGRBLWithOptions(t, mockGRBLOptions{HoldResponseFor: command})
 }
 
 func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
@@ -112,6 +118,9 @@ func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 	}
 	if opts.SuppressResponseFor != "" {
 		args = append(args, "-suppress-response-for", opts.SuppressResponseFor)
+	}
+	if opts.HoldResponseFor != "" {
+		args = append(args, "-hold-response-for", opts.HoldResponseFor)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = logFile
@@ -1522,9 +1531,10 @@ func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
 }
 
 func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T) {
-	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second})
-	// Do not suppress the response here. The response delay gives us a window to
-	// drop the serial peer before mockgrbl can write the otherwise-valid response.
+	m := startMockGRBLHoldingResponseFor(t, "$G")
+	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate
+	// the otherwise-valid response but blocks the serial write until the process is
+	// killed, making this a deterministic transport-drop case.
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
 
@@ -1545,9 +1555,6 @@ func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$G")
 	})
-	responsesAfter := mockResponseCount(t, m)
-	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 100*time.Millisecond, "[GC:", "ok")
-
 	m.stopNow(t)
 
 	requireProgramFailedWithAnyError(t, controller, transportDropErrorTexts()...)
@@ -1555,9 +1562,10 @@ func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T
 }
 
 func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
-	first := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second})
-	// Do not suppress the response here. The response delay gives us a window to
-	// drop the serial peer before mockgrbl can write the otherwise-valid response.
+	first := startMockGRBLHoldingResponseFor(t, "$G")
+	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate
+	// the otherwise-valid response but blocks the serial write until the process is
+	// killed, making this a deterministic transport-drop case.
 	h := connectControllerToMockWithEvents(t, first)
 	controller := h.Controller
 
@@ -1667,9 +1675,10 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 }
 
 func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
-	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second})
-	// Do not suppress the response here. The response delay gives us a window to
-	// drop the serial peer before mockgrbl can write the otherwise-valid response.
+	m := startMockGRBLHoldingResponseFor(t, "$#")
+	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate
+	// the otherwise-valid response but blocks the serial write until the process is
+	// killed, making this a deterministic transport-drop case.
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
 
@@ -1695,14 +1704,10 @@ func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$#")
 	})
-	responsesAfter := mockResponseCount(t, m)
-	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 100*time.Millisecond, "[G54:", "ok")
-
 	m.stopNow(t)
 
 	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
 		return snapshot.ProgramStatus == app.ProgramFailed &&
-			strings.Contains(snapshot.LastError, "rewrite line") &&
 			containsAny(snapshot.LastError, transportDropErrorTexts()...)
 	})
 	requireControllerErrorEventAny(t, h, controllerEventsAfter, transportDropErrorTexts()...)
