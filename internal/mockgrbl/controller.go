@@ -450,6 +450,47 @@ func (c *Controller) Events() []LogEntry {
 	defer c.mu.Unlock()
 	return append([]LogEntry(nil), c.events...)
 }
+
+func (c *Controller) DiscardResponseLogs(responses []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	lines := responseLogLines(responses)
+	if len(lines) == 0 {
+		return
+	}
+	for _, line := range lines {
+		c.responses = removeLastLogEntry(c.responses, "response", line)
+		c.events = removeLastLogEntry(c.events, "response", line)
+		c.logs = removeLastLogEntry(c.logs, "response", line)
+	}
+	c.lastResp = ""
+	c.log("response_suppressed", strings.Join(lines, "\n"))
+}
+
+func responseLogLines(responses []string) []string {
+	var lines []string
+	for _, response := range responses {
+		for _, line := range strings.Split(strings.ReplaceAll(response, "\r\n", "\n"), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+	}
+	return lines
+}
+
+func removeLastLogEntry(entries []LogEntry, kind, text string) []LogEntry {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Kind == kind && entries[i].Text == text {
+			copy(entries[i:], entries[i+1:])
+			return entries[:len(entries)-1]
+		}
+	}
+	return entries
+}
+
 func (c *Controller) Profile() any {
 	return struct {
 		Firmware FirmwareProfile `json:"firmware"`
