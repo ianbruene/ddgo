@@ -947,6 +947,38 @@ func TestDDGoStartProgramWithoutLoadedProgramAgainstMock(t *testing.T) {
 	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G", "$J=", "G4")
 }
 
+func TestDDGoProgramControlsRejectWithoutActiveRunAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	eventsAfter := mockEventCount(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	controllerEventsAfter := h.eventCount()
+	err := controller.PauseProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.ResumeProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not paused")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.StopProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	snapshot := controller.Snapshot()
+	if !snapshot.Connected || snapshot.ProgramStatus != app.ProgramNotLoaded || snapshot.MachineState != "Idle" {
+		t.Fatalf("controller state after rejected program controls = %+v, want connected idle with no loaded program", snapshot)
+	}
+	assertNoProgramRealtimeFor(t, m, eventsAfter, 300*time.Millisecond)
+}
+
 func TestDDGoStartProgramWhileRunningAgainstMock(t *testing.T) {
 	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
 	h := connectControllerToMockWithEvents(t, m)
@@ -1230,6 +1262,159 @@ func TestDDGoPauseResumeActiveMockProgram(t *testing.T) {
 
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramControlsRejectAfterCompletionAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "controls-after-completion.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load controls after completion program: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start controls after completion program: %v", err)
+	}
+	requireProgramCompleted(t, controller, 1)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	before := controller.Snapshot()
+	eventsAfter := mockEventCount(t, m)
+
+	controllerEventsAfter := h.eventCount()
+	err := controller.PauseProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.ResumeProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not paused")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.StopProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	snapshot := controller.Snapshot()
+	if snapshot.ProgramStatus != app.ProgramCompleted ||
+		snapshot.ProgramComplete != snapshot.ProgramTotal ||
+		snapshot.ProgramName != before.ProgramName ||
+		snapshot.ProgramPath != before.ProgramPath ||
+		!snapshot.Connected ||
+		snapshot.MachineState != "Idle" {
+		t.Fatalf("controller state after rejected controls following completion = %+v, before=%+v", snapshot, before)
+	}
+	assertNoProgramRealtimeFor(t, m, eventsAfter, 300*time.Millisecond)
+}
+
+func TestDDGoProgramControlsRejectAfterFailureAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "controls-after-failure.gcode", "G4 P0.1\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load controls after failure program: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start controls after failure program: %v", err)
+	}
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, "program failed at line 1: error:")
+	})
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	before := controller.Snapshot()
+	eventsAfter := mockEventCount(t, m)
+
+	controllerEventsAfter := h.eventCount()
+	err := controller.PauseProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.ResumeProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not paused")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.StopProgram(ctx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	snapshot := controller.Snapshot()
+	if snapshot.ProgramStatus != app.ProgramFailed ||
+		snapshot.LastError == "" ||
+		snapshot.ProgramName != before.ProgramName ||
+		snapshot.ProgramPath != before.ProgramPath ||
+		!snapshot.Connected ||
+		snapshot.MachineState != "Idle" {
+		t.Fatalf("controller state after rejected controls following failure = %+v, before=%+v", snapshot, before)
+	}
+	assertNoProgramRealtimeFor(t, m, eventsAfter, 300*time.Millisecond)
+}
+
+func TestDDGoProgramControlsRejectAfterStopAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 50 * time.Millisecond})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeRepeatedGStateProgram(t, "controls-after-stop.gcode", 50)
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load controls after stop program: %v", err)
+	}
+
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start controls after stop program: %v", err)
+	}
+	waitForActiveProgramProgress(t, controller, 5*time.Second)
+
+	actionCtx, actionCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer actionCancel()
+	if err := controller.StopProgram(actionCtx); err != nil {
+		t.Fatalf("stop active controls after stop program: %v", err)
+	}
+	waitForProgramStatus(t, controller, 5*time.Second, app.ProgramStopped)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	waitForMockEvents(t, m, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "!") && hasMockLogEntry(events, "command", "Ctrl-X")
+	})
+
+	eventsAfter := mockEventCount(t, m)
+	before := controller.Snapshot()
+
+	controllerEventsAfter := h.eventCount()
+	err := controller.PauseProgram(actionCtx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.ResumeProgram(actionCtx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not paused")
+
+	controllerEventsAfter = h.eventCount()
+	err = controller.StopProgram(actionCtx)
+	requireProgramControlError(t, h, controllerEventsAfter, err, "program is not running")
+
+	snapshot := controller.Snapshot()
+	if snapshot.ProgramStatus != app.ProgramStopped ||
+		snapshot.ProgramName != before.ProgramName ||
+		snapshot.ProgramPath != before.ProgramPath ||
+		!snapshot.Connected ||
+		snapshot.MachineState != "Idle" {
+		t.Fatalf("controller state after rejected controls following stop = %+v, before=%+v", snapshot, before)
+	}
+	assertNoProgramRealtimeFor(t, m, eventsAfter, 300*time.Millisecond)
 }
 
 func TestDDGoProgramQueryCollectsWCSOffsetsAgainstMock(t *testing.T) {
@@ -2069,6 +2254,19 @@ func requireProgramErrorEvent(t *testing.T, h *controllerHarness, after int, tex
 	h.waitForEventsAfter(t, after, 5*time.Second, func(events []app.Event) bool {
 		return hasControllerEventText(events, text)
 	})
+}
+
+func requireProgramControlError(t *testing.T, h *controllerHarness, after int, err error, want string) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("program control error = %v, want containing %q", err, want)
+	}
+	requireProgramErrorEvent(t, h, after, want)
+}
+
+func assertNoProgramRealtimeFor(t *testing.T, m *mockProcess, after int, duration time.Duration) {
+	t.Helper()
+	assertNoNewMockCommandContainingFor(t, m, after, duration, "!", "~", "Ctrl-X")
 }
 
 func requireLoadedProgram(t *testing.T, c *app.Controller, name string, total int) {
