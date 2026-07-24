@@ -30,6 +30,11 @@ type mockProcess struct {
 	HTTPBase   string
 	LogPath    string
 	client     *http.Client
+
+	cancel   context.CancelFunc
+	cmd      *exec.Cmd
+	stopOnce sync.Once
+	waitErr  error
 }
 
 type mockState struct {
@@ -121,11 +126,12 @@ func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 		HTTPBase:   "http://" + httpAddr,
 		LogPath:    logPath,
 		client:     &http.Client{Timeout: 500 * time.Millisecond},
+		cancel:     cancel,
+		cmd:        cmd,
 	}
 
 	t.Cleanup(func() {
-		cancel()
-		_ = cmd.Wait()
+		m.stop()
 		if t.Failed() {
 			m.dumpDiagnostics(t)
 		}
@@ -144,6 +150,23 @@ func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 	})
 
 	return m
+}
+
+func (m *mockProcess) stop() error {
+	m.stopOnce.Do(func() {
+		if m.cancel != nil {
+			m.cancel()
+		}
+		if m.cmd != nil {
+			m.waitErr = m.cmd.Wait()
+		}
+	})
+	return m.waitErr
+}
+
+func (m *mockProcess) stopNow(t *testing.T) {
+	t.Helper()
+	_ = m.stop()
 }
 
 func (m *mockProcess) state(t *testing.T) mockState {
@@ -1498,6 +1521,95 @@ func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
 	}
 }
 
+func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second, SuppressResponseFor: "$G"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "program-transport-drop-ack.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load transport drop ack program: %v", err)
+	}
+
+	eventsAfter := mockEventCount(t, m)
+	responsesAfter := mockResponseCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start transport drop ack program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G")
+	})
+	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 100*time.Millisecond, "[GC:", "ok")
+
+	m.stopNow(t)
+
+	requireProgramFailedWithAnyError(t, controller, transportDropErrorTexts()...)
+	requireControllerErrorEventAny(t, h, controllerEventsAfter, transportDropErrorTexts()...)
+}
+
+func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
+	first := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second, SuppressResponseFor: "$G"})
+	h := connectControllerToMockWithEvents(t, first)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "program-transport-drop-reconnect.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load transport drop reconnect program: %v", err)
+	}
+
+	eventsAfter := mockEventCount(t, first)
+	runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start transport drop reconnect program: %v", err)
+	}
+	waitForNewMockEvents(t, first, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G")
+	})
+	first.stopNow(t)
+	requireProgramFailedWithAnyError(t, controller, transportDropErrorTexts()...)
+
+	if controller.Snapshot().Connected {
+		if err := controller.Disconnect(); err != nil {
+			t.Fatalf("disconnect after transport drop: %v", err)
+		}
+	}
+
+	second := startMockGRBL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := controller.Connect(ctx, transport.DefaultPortConfig(second.SerialPath)); err != nil {
+		t.Fatalf("reconnect after transport drop: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return controller.Snapshot().Connected })
+
+	recoveryPath := writeIntegrationProgramFile(t, "program-transport-drop-recovery.gcode", "$I\n")
+	if err := controller.LoadProgramFile(recoveryPath); err != nil {
+		t.Fatalf("load transport drop recovery program: %v", err)
+	}
+
+	responsesAfter := mockResponseCount(t, second)
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer recoveryCancel()
+	if err := controller.StartProgram(recoveryCtx); err != nil {
+		t.Fatalf("start transport drop recovery program: %v", err)
+	}
+	waitForNewMockResponses(t, second, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 1)
+	requestStatus(t, controller)
+	idle := requireControllerIdle(t, controller)
+	if !idle.Connected || idle.MachineState != "Idle" || idle.LastError != "" {
+		t.Fatalf("final recovery status = %+v, want connected idle with no error", idle)
+	}
+}
+
 func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$G"})
 	h := connectControllerToMockWithEvents(t, m)
@@ -1545,6 +1657,54 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	idle := requireControllerIdle(t, controller)
 	if !idle.Connected || idle.MachineState != "Idle" || idle.LastError != "" {
 		t.Fatalf("final recovery status = %+v, want connected idle with no error", idle)
+	}
+}
+
+func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second, SuppressResponseFor: "$#"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		_, err := runtime.ReadWCSOffsets(ctx)
+		return line.Text, false, err
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-query-transport-drop.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load query transport drop program: %v", err)
+	}
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start query transport drop program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$#")
+	})
+	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 100*time.Millisecond, "[G54:", "ok")
+
+	m.stopNow(t)
+
+	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, "rewrite line") &&
+			containsAny(snapshot.LastError, transportDropErrorTexts()...)
+	})
+	requireControllerErrorEventAny(t, h, controllerEventsAfter, transportDropErrorTexts()...)
+	if failed.ProgramComplete != 0 {
+		t.Fatalf("program completed %d lines after query transport drop; want 0; state=%+v", failed.ProgramComplete, failed)
+	}
+	if failed.Connected {
+		if err := controller.Disconnect(); err != nil {
+			t.Fatalf("disconnect after query transport drop: %v", err)
+		}
 	}
 }
 
@@ -2456,6 +2616,46 @@ func requireLoadedProgram(t *testing.T, c *app.Controller, name string, total in
 		snapshot.LastError != "" {
 		t.Fatalf("loaded program state = %+v, want loaded %q with %d lines and no error", snapshot, name, total)
 	}
+}
+
+func transportDropErrorTexts() []string {
+	return []string{
+		"context deadline exceeded",
+		"input/output error",
+		"device not configured",
+		"bad file descriptor",
+		"file already closed",
+		"use of closed file",
+		"use of closed network connection",
+	}
+}
+
+func containsAny(s string, texts ...string) bool {
+	for _, text := range texts {
+		if strings.Contains(s, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireProgramFailedWithAnyError(t *testing.T, c *app.Controller, texts ...string) app.State {
+	t.Helper()
+	return waitForControllerState(t, c, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed && containsAny(snapshot.LastError, texts...)
+	})
+}
+
+func requireControllerErrorEventAny(t *testing.T, h *controllerHarness, after int, texts ...string) {
+	t.Helper()
+	h.waitForEventsAfter(t, after, 5*time.Second, func(events []app.Event) bool {
+		for _, event := range events {
+			if containsAny(event.Text, texts...) {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func requireProgramFailedWithError(t *testing.T, c *app.Controller, text string) app.State {
