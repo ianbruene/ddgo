@@ -1522,7 +1522,9 @@ func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
 }
 
 func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T) {
-	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second, SuppressResponseFor: "$G"})
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second})
+	// Do not suppress the response here. The response delay gives us a window to
+	// drop the serial peer before mockgrbl can write the otherwise-valid response.
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
 
@@ -1532,7 +1534,6 @@ func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T
 	}
 
 	eventsAfter := mockEventCount(t, m)
-	responsesAfter := mockResponseCount(t, m)
 	controllerEventsAfter := h.eventCount()
 
 	runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1544,6 +1545,7 @@ func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$G")
 	})
+	responsesAfter := mockResponseCount(t, m)
 	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 100*time.Millisecond, "[GC:", "ok")
 
 	m.stopNow(t)
@@ -1553,7 +1555,9 @@ func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T
 }
 
 func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
-	first := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second, SuppressResponseFor: "$G"})
+	first := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second})
+	// Do not suppress the response here. The response delay gives us a window to
+	// drop the serial peer before mockgrbl can write the otherwise-valid response.
 	h := connectControllerToMockWithEvents(t, first)
 	controller := h.Controller
 
@@ -1587,6 +1591,8 @@ func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
 		t.Fatalf("reconnect after transport drop: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool { return controller.Snapshot().Connected })
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
 
 	recoveryPath := writeIntegrationProgramFile(t, "program-transport-drop-recovery.gcode", "$I\n")
 	if err := controller.LoadProgramFile(recoveryPath); err != nil {
@@ -1661,7 +1667,9 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 }
 
 func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
-	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second, SuppressResponseFor: "$#"})
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ResponseDelay: 2 * time.Second})
+	// Do not suppress the response here. The response delay gives us a window to
+	// drop the serial peer before mockgrbl can write the otherwise-valid response.
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
 
@@ -1675,7 +1683,6 @@ func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
 		t.Fatalf("load query transport drop program: %v", err)
 	}
 
-	responsesAfter := mockResponseCount(t, m)
 	eventsAfter := mockEventCount(t, m)
 	controllerEventsAfter := h.eventCount()
 
@@ -1688,6 +1695,7 @@ func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$#")
 	})
+	responsesAfter := mockResponseCount(t, m)
 	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 100*time.Millisecond, "[G54:", "ok")
 
 	m.stopNow(t)
