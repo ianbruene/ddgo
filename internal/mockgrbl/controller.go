@@ -3,6 +3,7 @@ package mockgrbl
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -182,6 +183,9 @@ func (c *Controller) handleLine(raw string) []string {
 	if strings.HasPrefix(norm, "$J=") {
 		return c.handleJog(norm)
 	}
+	if strings.HasPrefix(norm, "G10L2") {
+		return c.handleWCSWrite(norm)
+	}
 	switch norm {
 	case "$X":
 		c.setState(StateIdle)
@@ -203,6 +207,38 @@ func (c *Controller) handleLine(raw string) []string {
 	default:
 		return c.errorLine(norm, "Unsupported", 20)
 	}
+}
+
+func (c *Controller) handleWCSWrite(norm string) []string {
+	const prefix = "G10L2P"
+	if !strings.HasPrefix(norm, prefix) {
+		return c.errorLine(norm, "WCS write unsupported", 20)
+	}
+
+	rest := strings.TrimPrefix(norm, prefix)
+	parameterEnd := 0
+	for parameterEnd < len(rest) && rest[parameterEnd] >= '0' && rest[parameterEnd] <= '9' {
+		parameterEnd++
+	}
+	if parameterEnd == 0 {
+		return c.errorLine(norm, "WCS write unsupported", 20)
+	}
+	parameter, err := strconv.Atoi(rest[:parameterEnd])
+	if err != nil || parameter < 1 || parameter > 6 || parameterEnd >= len(rest) {
+		return c.errorLine(norm, "WCS write unsupported", 20)
+	}
+
+	axis := rest[parameterEnd]
+	value := rest[parameterEnd+1:]
+	if (axis != 'X' && axis != 'Y' && axis != 'Z') || value == "" {
+		return c.errorLine(norm, "WCS write unsupported", 20)
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return c.errorLine(norm, "WCS write unsupported", 20)
+	}
+
+	return c.emit(c.fw.OK())
 }
 func (c *Controller) wcsOffsetsResponse() string {
 	lines := []string{
