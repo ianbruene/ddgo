@@ -186,6 +186,9 @@ func (c *Controller) handleLine(raw string) []string {
 	if strings.HasPrefix(norm, "G10L2") {
 		return c.handleWCSWrite(norm)
 	}
+	if strings.HasPrefix(norm, "G38.2") {
+		return c.handleProbe(norm)
+	}
 	switch norm {
 	case "$X":
 		c.setState(StateIdle)
@@ -207,6 +210,52 @@ func (c *Controller) handleLine(raw string) []string {
 	default:
 		return c.errorLine(norm, "Unsupported", 20)
 	}
+}
+
+func (c *Controller) handleProbe(norm string) []string {
+	const prefix = "G38.2"
+	body := strings.TrimPrefix(norm, prefix)
+	if len(body) < 4 || (body[0] != 'X' && body[0] != 'Y' && body[0] != 'Z') {
+		return c.errorLine(norm, "Probe unsupported", 20)
+	}
+
+	feedAt := strings.IndexByte(body[1:], 'F')
+	if feedAt < 0 {
+		return c.errorLine(norm, "Probe unsupported", 20)
+	}
+	feedAt++
+	if strings.Contains(body[feedAt+1:], "F") {
+		return c.errorLine(norm, "Probe unsupported", 20)
+	}
+	target, targetErr := strconv.ParseFloat(body[1:feedAt], 64)
+	feed, feedErr := strconv.ParseFloat(body[feedAt+1:], 64)
+	if targetErr != nil || feedErr != nil || math.IsNaN(target) || math.IsInf(target, 0) ||
+		math.IsNaN(feed) || math.IsInf(feed, 0) || feed <= 0 {
+		return c.errorLine(norm, "Probe unsupported", 20)
+	}
+
+	point := c.pos
+	axisIndex := int(body[0] - 'X')
+	if body[0] == 'Z' {
+		axisIndex = 2
+	}
+	point[axisIndex] = target
+	contact := map[byte]float64{'X': -1, 'Y': -2, 'Z': -3.5}[body[0]]
+	success := target <= contact
+	if success {
+		point[axisIndex] = contact
+	}
+	return c.probeResponse(point, success)
+}
+
+func (c *Controller) probeResponse(point [3]float64, success bool) []string {
+	successFlag := 0
+	if success {
+		successFlag = 1
+		c.pos = point
+	}
+	line := fmt.Sprintf("[PRB:%.3f,%.3f,%.3f:%d]", point[0], point[1], point[2], successFlag)
+	return c.emit(line + c.fw.LineEnding + c.fw.OK())
 }
 
 func (c *Controller) handleWCSWrite(norm string) []string {

@@ -20,6 +20,7 @@ func main() {
 	responseDelay := flag.Duration("response-delay", 0, "delay before writing each serial response line")
 	suppressResponseFor := flag.String("suppress-response-for", "", "normalized line command whose serial responses should be suppressed")
 	holdResponseFor := flag.String("hold-response-for", "", "normalized line command whose serial responses should be held until the mock process exits")
+	probeOmitResultFor := flag.String("probe-omit-result-for", "", "normalized probe command that should return only ok (test hook)")
 	flag.Parse()
 	ctl := mockgrbl.NewController(mockgrbl.DefaultFirmwareProfile(), mockgrbl.DefaultMachineProfile(), nil)
 	ptm, slave, err := openPTY()
@@ -44,6 +45,11 @@ func main() {
 				responses := ctl.ProcessBytes([]byte{b})
 				events := ctl.Events()
 				newEvents := events[eventsBefore:]
+				if shouldSuppressResponses(newEvents, *probeOmitResultFor) {
+					ctl.DiscardResponseLogs(responses)
+					writeResponses(ptm, []string{"ok\r\n"}, *responseDelay)
+					continue
+				}
 				if shouldSuppressResponses(newEvents, *suppressResponseFor) {
 					ctl.DiscardResponseLogs(responses)
 					continue

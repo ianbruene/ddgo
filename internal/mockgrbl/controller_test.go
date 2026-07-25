@@ -200,6 +200,68 @@ func TestWCSWriteRejected(t *testing.T) {
 	}
 }
 
+func TestProbeAcceptedContact(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte("G38.2 Z-5 F100\n")))
+	if !strings.Contains(out, "[PRB:0.000,0.000,-3.500:1]\r\n") || !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("probe response = %q", out)
+	}
+	if !hasLog(c.commands, "command", "G38.2Z-5F100") {
+		t.Fatalf("normalized probe command not logged: %+v", c.commands)
+	}
+	snap := c.Snapshot()
+	if snap.State != StateIdle || snap.MachinePosition != [3]float64{0, 0, -3.5} {
+		t.Fatalf("snapshot after probe contact = %+v", snap)
+	}
+}
+
+func TestProbeAcceptedNoContact(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte("G38.2 Z-1 F100\n")))
+	if !strings.Contains(out, "[PRB:0.000,0.000,-1.000:0]\r\n") || !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("probe response = %q", out)
+	}
+	if !hasLog(c.commands, "command", "G38.2Z-1F100") {
+		t.Fatalf("normalized probe command not logged: %+v", c.commands)
+	}
+	// A no-contact result reports the commanded endpoint but deliberately does not
+	// move the mock machine, which does not model the probe's full travel.
+	snap := c.Snapshot()
+	if snap.State != StateIdle || snap.MachinePosition != [3]float64{} {
+		t.Fatalf("snapshot after no contact = %+v", snap)
+	}
+}
+
+func TestProbeRejected(t *testing.T) {
+	tests := []struct {
+		line       string
+		normalized string
+	}{
+		{"G38.2 Z-5\n", "G38.2Z-5"},
+		{"G38.2 Z-5 F0\n", "G38.2Z-5F0"},
+		{"G38.2 A-5 F100\n", "G38.2A-5F100"},
+		{"G38.3 Z-5 F100\n", "G38.3Z-5F100"},
+		{"G38.2 Zbad F100\n", "G38.2ZBADF100"},
+		{"G38.2 Z-5 Fbad\n", "G38.2Z-5FBAD"},
+		{"G38.2 Z-5 F100 X1\n", "G38.2Z-5F100X1"},
+		{"G38.2 ZNaN F100\n", "G38.2ZNANF100"},
+		{"G38.2 Z-Inf F100\n", "G38.2Z-INFF100"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.normalized, func(t *testing.T) {
+			c, _ := testCtl()
+			out := joined(c.ProcessBytes([]byte(tt.line)))
+			if !strings.Contains(out, "[echo: "+tt.normalized+"]\r\n") || !strings.Contains(out, "error:20\r\n") {
+				t.Fatalf("response = %q, want echoed terminal error:20", out)
+			}
+			if got := c.Snapshot().State; got != StateIdle {
+				t.Fatalf("state = %q, want %q", got, StateIdle)
+			}
+		})
+	}
+}
+
 func TestSettingsDump(t *testing.T) {
 	c, _ := testCtl()
 	out := joined(c.ProcessBytes([]byte("$$\n")))
