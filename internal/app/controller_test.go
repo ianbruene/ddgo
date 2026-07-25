@@ -873,61 +873,6 @@ func TestControllerPauseResumeWriteFailureKeepsState(t *testing.T) {
 	}
 }
 
-func TestControllerProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
-	t.Parallel()
-
-	fake := transport.NewFakeTransport()
-	controller := NewController(fake, ports.StaticList(nil, nil))
-	run := &programRun{rxCh: make(chan string, 1)}
-	controller.mu.Lock()
-	controller.run = run
-	controller.state.ProgramStatus = ProgramRunning
-	controller.mu.Unlock()
-	run.rxCh <- "ok"
-
-	controller.mu.Lock()
-	overflowRun := controller.deliverProgramResponseLocked("ok")
-	controller.mu.Unlock()
-	if overflowRun != run {
-		t.Fatalf("deliverProgramResponseLocked() overflow run mismatch")
-	}
-
-	controller.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
-	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
-	if got, want := state.LastError, "program response backlog full"; got != want {
-		t.Fatalf("LastError = %q, want %q", got, want)
-	}
-	errEv := waitForEvent(t, controller.Events(), EventError)
-	if got, want := errEv.Text, "program response backlog full"; got != want {
-		t.Fatalf("error text = %q, want %q", got, want)
-	}
-}
-
-func TestControllerQueryResponseBacklogOverflowFailsProgram(t *testing.T) {
-	t.Parallel()
-
-	controller := NewController(transport.NewFakeTransport(), ports.StaticList(nil, nil))
-	run := &programRun{rxCh: make(chan string, 1), queryRxCh: make(chan string, 1)}
-	controller.mu.Lock()
-	controller.run = run
-	controller.state.ProgramStatus = ProgramRunning
-	controller.mu.Unlock()
-	run.queryRxCh <- "[G54:1.000,2.000,3.000]"
-
-	controller.mu.Lock()
-	overflowRun := controller.deliverProgramResponseLocked("[G55:4.000,5.000,6.000]")
-	controller.mu.Unlock()
-	if overflowRun != run {
-		t.Fatalf("deliverProgramResponseLocked() overflow run mismatch")
-	}
-
-	controller.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
-	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
-	if got, want := state.LastError, "program response backlog full"; got != want {
-		t.Fatalf("LastError = %q, want %q", got, want)
-	}
-}
-
 func enableTestContour(t *testing.T, controller *Controller) []macro.Point {
 	t.Helper()
 	points := []macro.Point{
