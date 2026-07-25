@@ -1767,7 +1767,45 @@ func TestDDGoProgramQueryFailsWhenResponseIsMissingAgainstMock(t *testing.T) {
 	}
 }
 
-func TestDDGoProgramQueryCollectsWCSOffsetsAgainstMock(t *testing.T) {
+func TestDDGoProgramIgnoresSettingsDumpResponsesAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programPath := writeIntegrationProgramFile(t, "noisy-settings.gcode", "$$\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load noisy settings program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start noisy settings program: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$$")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "$0=") && hasMockResponse(responses, "$132=") && hasMockResponse(responses, "ok")
+	})
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventText(events, "$0=") && hasControllerEventText(events, "$132=") && hasControllerEventText(events, "ok")
+	})
+	requireProgramCompleted(t, controller, 1)
+	completed := controller.Snapshot()
+	if completed.LastError != "" {
+		t.Fatalf("LastError = %q, want empty", completed.LastError)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramQueryIgnoresNoisyWCSResponsesAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
@@ -1802,7 +1840,7 @@ func TestDDGoProgramQueryCollectsWCSOffsetsAgainstMock(t *testing.T) {
 		return hasMockLogEntry(events, "command", "$#") && hasMockLogEntry(events, "command", "$G")
 	})
 	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
-		return hasMockResponse(responses, "[G54:") && hasMockResponse(responses, "[GC:") && countMockResponses(responses, "ok") >= 2
+		return hasMockResponse(responses, "[MSG:wcs-dump]") && hasMockResponse(responses, "[G54:") && hasMockResponse(responses, "[GC:") && countMockResponses(responses, "ok") >= 2
 	})
 	select {
 	case <-queryDone:
@@ -1821,7 +1859,7 @@ func TestDDGoProgramQueryCollectsWCSOffsetsAgainstMock(t *testing.T) {
 
 	requireProgramCompleted(t, controller, 1)
 	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
-		return hasControllerEventText(events, "program program-query-wcs.gcode completed")
+		return hasControllerEventText(events, "[MSG:wcs-dump]") && hasControllerEventText(events, "program program-query-wcs.gcode completed")
 	})
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)

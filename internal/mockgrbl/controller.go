@@ -196,6 +196,8 @@ func (c *Controller) handleLine(raw string) []string {
 		return c.emit(c.fw.BuildInfo() + c.fw.LineEnding + c.fw.OK())
 	case "$G":
 		return c.emit("[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]" + c.fw.LineEnding + c.fw.OK())
+	case "$$":
+		return c.settingsResponse()
 	case "$#":
 		return c.emit(c.wcsOffsetsResponse())
 	default:
@@ -204,6 +206,7 @@ func (c *Controller) handleLine(raw string) []string {
 }
 func (c *Controller) wcsOffsetsResponse() string {
 	lines := []string{
+		"[MSG:wcs-dump]",
 		"[G54:0.000,0.000,0.000]",
 		"[G55:0.000,0.000,0.000]",
 		"[G56:0.000,0.000,0.000]",
@@ -213,6 +216,15 @@ func (c *Controller) wcsOffsetsResponse() string {
 		c.fw.OK(),
 	}
 	return strings.Join(lines, c.fw.LineEnding)
+}
+
+func (c *Controller) settingsResponse() []string {
+	lines := []string{
+		"$0=10", "$1=25", "$10=31", "$11=0.010", "$12=0.002", "$13=0",
+		"$20=0", "$21=0", "$22=0", "$100=40.000", "$101=40.000", "$102=160.000",
+		"$130=86.500", "$131=241.500", "$132=78.500", "ok",
+	}
+	return c.emit(strings.Join(lines, c.fw.LineEnding) + c.fw.LineEnding)
 }
 
 func (c *Controller) handleJog(norm string) []string {

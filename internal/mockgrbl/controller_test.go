@@ -129,7 +129,7 @@ func TestBuildInfoIsGrblDDShaped(t *testing.T) {
 func TestWCSOffsetsQuery(t *testing.T) {
 	c, _ := testCtl()
 	out := joined(c.ProcessBytes([]byte("$#\n")))
-	if !strings.Contains(out, "[G54:0.000,0.000,0.000]\r\n") || !strings.Contains(out, "[G59:0.000,0.000,0.000]\r\n") {
+	if !strings.Contains(out, "[MSG:wcs-dump]\r\n") || !strings.Contains(out, "[G54:0.000,0.000,0.000]\r\n") || !strings.Contains(out, "[G59:0.000,0.000,0.000]\r\n") {
 		t.Fatalf("WCS response missing offsets: %q", out)
 	}
 	if !strings.HasSuffix(out, "ok\r\n") {
@@ -144,6 +144,23 @@ func TestWCSOffsetsQuery(t *testing.T) {
 	}
 	if len(c.responses) < 7 || c.responses[len(c.responses)-1].Text != "ok" {
 		t.Fatalf("unexpected response log: %+v", c.responses)
+	}
+}
+
+func TestSettingsDump(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte("$$\n")))
+	if !strings.Contains(out, "$0=10\r\n") || !strings.Contains(out, "$132=78.500\r\n") || !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("unexpected settings response: %q", out)
+	}
+	if !hasLog(c.responses, "response", "$0=10") || !hasLog(c.responses, "response", "$132=78.500") || !hasLog(c.responses, "response", "ok") {
+		t.Fatalf("settings responses not logged: %+v", c.responses)
+	}
+	if !hasLog(c.commands, "command", "$$") {
+		t.Fatalf("settings command not logged: %+v", c.commands)
+	}
+	if got := c.Snapshot().State; got != StateIdle {
+		t.Fatalf("state = %q, want %q", got, StateIdle)
 	}
 }
 
