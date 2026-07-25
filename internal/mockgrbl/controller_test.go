@@ -147,6 +147,59 @@ func TestWCSOffsetsQuery(t *testing.T) {
 	}
 }
 
+func TestWCSWriteAccepted(t *testing.T) {
+	tests := []struct {
+		line       string
+		normalized string
+	}{
+		{"G10 L2 P1 Z-1.250000\n", "G10L2P1Z-1.250000"},
+		{"G10L2P2X2.000000\n", "G10L2P2X2.000000"},
+		{"G10 L2 P6 Y0.000000\n", "G10L2P6Y0.000000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.normalized, func(t *testing.T) {
+			c, _ := testCtl()
+			out := joined(c.ProcessBytes([]byte(tt.line)))
+			if !strings.HasSuffix(out, "ok\r\n") {
+				t.Fatalf("response = %q, want terminal ok", out)
+			}
+			if !hasLog(c.commands, "command", tt.normalized) {
+				t.Fatalf("normalized command %q not logged: %+v", tt.normalized, c.commands)
+			}
+			if got := c.Snapshot().State; got != StateIdle {
+				t.Fatalf("state = %q, want %q", got, StateIdle)
+			}
+		})
+	}
+}
+
+func TestWCSWriteRejected(t *testing.T) {
+	tests := []struct {
+		line       string
+		normalized string
+	}{
+		{"G10 L2 P0 Z1\n", "G10L2P0Z1"},
+		{"G10 L2 P7 Z1\n", "G10L2P7Z1"},
+		{"G10 L2 P1 A1\n", "G10L2P1A1"},
+		{"G10 L2 P1 Zbad\n", "G10L2P1ZBAD"},
+		{"G10 L20 P1 Z1\n", "G10L20P1Z1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.normalized, func(t *testing.T) {
+			c, _ := testCtl()
+			out := joined(c.ProcessBytes([]byte(tt.line)))
+			if !strings.Contains(out, "[echo: "+tt.normalized+"]\r\n") || !strings.Contains(out, "error:20\r\n") {
+				t.Fatalf("response = %q, want echoed terminal error:20", out)
+			}
+			if got := c.Snapshot().State; got != StateIdle {
+				t.Fatalf("state = %q, want %q", got, StateIdle)
+			}
+		})
+	}
+}
+
 func TestSettingsDump(t *testing.T) {
 	c, _ := testCtl()
 	out := joined(c.ProcessBytes([]byte("$$\n")))

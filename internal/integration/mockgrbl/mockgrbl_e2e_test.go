@@ -1865,6 +1865,133 @@ func TestDDGoProgramQueryIgnoresNoisyWCSResponsesAgainstMock(t *testing.T) {
 	requireControllerIdle(t, controller)
 }
 
+func TestDDGoProgramWritesWCSOffsetAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		if err := runtime.WriteWCSOffset(ctx, macro.WCS("G54"), macro.AxisZ, -1.25); err != nil {
+			return line.Text, false, err
+		}
+		return line.Text, false, nil
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-wcs-write.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load WCS write program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start WCS write program: %v", err)
+	}
+
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G10L2P1Z-1.250000") && hasMockLogEntry(events, "command", "$G")
+	})
+	wcsIndex, queryIndex := -1, -1
+	for i, event := range events {
+		if event.Kind == "command" && event.Text == "G10L2P1Z-1.250000" {
+			wcsIndex = i
+		}
+		if event.Kind == "command" && event.Text == "$G" {
+			queryIndex = i
+		}
+	}
+	if wcsIndex < 0 || queryIndex < 0 || wcsIndex >= queryIndex {
+		t.Fatalf("WCS write did not precede program line: %+v", events)
+	}
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[GC:") && countMockResponses(responses, "ok") >= 2
+	})
+
+	requireProgramCompleted(t, controller, 1)
+	completed := controller.Snapshot()
+	if completed.LastError != "" {
+		t.Fatalf("LastError = %q, want empty", completed.LastError)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoProgramFailsWhenWCSWriteRejectedAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	controller.SetMotionRewriter(programQueryRewriter{fn: func(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+		err := runtime.SendLineAndWaitOK(ctx, "G10 L2 P7 Z1")
+		return line.Text, false, err
+	}})
+
+	programPath := writeIntegrationProgramFile(t, "program-wcs-write-rejected.gcode", "$G\n")
+	if err := controller.LoadProgramFile(programPath); err != nil {
+		t.Fatalf("load rejected WCS write program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start rejected WCS write program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G10L2P7Z1")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "error:20")
+	})
+	failed := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.ProgramStatus == app.ProgramFailed &&
+			strings.Contains(snapshot.LastError, "rewrite line") &&
+			strings.Contains(snapshot.LastError, "macro command failed: error:20")
+	})
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "macro command failed: error:20")
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G")
+
+	requestStatus(t, controller)
+	idle := requireControllerIdle(t, controller)
+	if idle.ProgramStatus != app.ProgramFailed {
+		t.Fatalf("final status = %+v after failure %+v, want ProgramFailed", idle, failed)
+	}
+
+	controller.SetMotionRewriter(nil)
+	recoveryPath := writeIntegrationProgramFile(t, "program-after-wcs-rejection.gcode", "$I\n")
+	if err := controller.LoadProgramFile(recoveryPath); err != nil {
+		t.Fatalf("load recovery program: %v", err)
+	}
+	requireLoadedProgram(t, controller, "program-after-wcs-rejection.gcode", 1)
+
+	recoveryResponsesAfter := mockResponseCount(t, m)
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer recoveryCancel()
+	if err := controller.StartProgram(recoveryCtx); err != nil {
+		t.Fatalf("start recovery program: %v", err)
+	}
+	waitForNewMockResponses(t, m, recoveryResponsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 1)
+	requestStatus(t, controller)
+	final := requireControllerIdle(t, controller)
+	if final.LastError != "" {
+		t.Fatalf("LastError = %q after recovery, want empty", final.LastError)
+	}
+}
+
 func TestDDGoProgramQueryFailureFailsProgramAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	h := connectControllerToMockWithEvents(t, m)
