@@ -76,6 +76,7 @@ type mockGRBLOptions struct {
 	ResponseDelay       time.Duration
 	SuppressResponseFor string
 	HoldResponseFor     string
+	ProbeOmitResultFor  string
 }
 
 func startMockGRBL(t *testing.T) *mockProcess {
@@ -121,6 +122,9 @@ func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 	}
 	if opts.HoldResponseFor != "" {
 		args = append(args, "-hold-response-for", opts.HoldResponseFor)
+	}
+	if opts.ProbeOmitResultFor != "" {
+		args = append(args, "-probe-omit-result-for", opts.ProbeOmitResultFor)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = logFile
@@ -2172,6 +2176,159 @@ func TestDDGoProgramSendAcceptedAgainstMock(t *testing.T) {
 
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
+}
+
+func installProbeMacro(t *testing.T, controller *app.Controller, command string, result chan<- macro.Point) {
+	t.Helper()
+	registry := macro.NewRegistry()
+	registry.Register(92, macro.HandlerFunc(func(ctx context.Context, runtime macro.Runtime, _ macro.Invocation) error {
+		point, err := runtime.RunProbe(ctx, command)
+		if err != nil {
+			return err
+		}
+		if result != nil {
+			result <- point
+		}
+		return nil
+	}))
+	controller.SetMacroEngine(macro.NewEngine(registry))
+}
+
+func startLoadedProgram(t *testing.T, controller *app.Controller, name, program string) {
+	t.Helper()
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, name, program)); err != nil {
+		t.Fatalf("load %s: %v", name, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start %s: %v", name, err)
+	}
+}
+
+func TestDDGoRunProbeSucceedsAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	result := make(chan macro.Point, 1)
+	installProbeMacro(t, controller, "G38.2 Z-5 F100", result)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedProgram(t, controller, "successful-probe.gcode", "M92\n")
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G38.2Z-5F100")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[PRB:0.000,0.000,-3.500:1]") && hasMockResponse(responses, "ok")
+	})
+	select {
+	case point := <-result:
+		if point != (macro.Point{X: 0, Y: 0, Z: -3.5}) {
+			t.Fatalf("RunProbe point = %+v", point)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe macro did not return a point")
+	}
+	requireProgramCompleted(t, controller, 1)
+	if point, ok := controller.LastProbePoint(); !ok || point != (macro.Point{X: 0, Y: 0, Z: -3.5}) {
+		t.Fatalf("LastProbePoint = %+v, %v", point, ok)
+	}
+	if got := m.state(t).MachinePosition; got != [3]float64{0, 0, -3.5} {
+		t.Fatalf("mock machine position = %v", got)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoRunProbeNoContactFailsAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	installProbeMacro(t, controller, "G38.2 Z-1 F100", nil)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedProgram(t, controller, "no-contact-probe.gcode", "M92\n$G\n")
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G38.2Z-1F100")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[PRB:0.000,0.000,-1.000:0]") && hasMockResponse(responses, "ok")
+	})
+	failed := requireProgramFailedWithError(t, controller, "probe did not contact")
+	if !strings.Contains(failed.LastError, "macro M92 failed at line 1") {
+		t.Fatalf("probe failure lacks macro context: %q", failed.LastError)
+	}
+	if point, ok := controller.LastProbePoint(); ok {
+		t.Fatalf("failed probe stored LastProbePoint %+v", point)
+	}
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 250*time.Millisecond, "$G")
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoRunProbeControllerErrorFailsAndRecoversAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	installProbeMacro(t, controller, "G38.2 Z-5 F0", nil)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedProgram(t, controller, "rejected-probe.gcode", "M92\n$G\n")
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G38.2Z-5F0")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "error:20")
+	})
+	failed := requireProgramFailedWithError(t, controller, "query command failed: error:20")
+	if !strings.Contains(failed.LastError, "macro M92 failed at line 1") {
+		t.Fatalf("probe failure lacks macro context: %q", failed.LastError)
+	}
+	if point, ok := controller.LastProbePoint(); ok {
+		t.Fatalf("rejected probe stored LastProbePoint %+v", point)
+	}
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 250*time.Millisecond, "$G")
+
+	recoveryResponses := mockResponseCount(t, m)
+	startLoadedProgram(t, controller, "probe-error-recovery.gcode", "$I\n")
+	waitForNewMockResponses(t, m, recoveryResponses, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 1)
+}
+
+func TestDDGoRunProbeMissingResultFailsAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{ProbeOmitResultFor: "G38.2Z-5F100"})
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	installProbeMacro(t, controller, "G38.2 Z-5 F100", nil)
+	eventsAfter := mockEventCount(t, m)
+	startLoadedProgram(t, controller, "missing-result-probe.gcode", "M92\n")
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G38.2Z-5F100")
+	})
+	failed := requireProgramFailedWithError(t, controller, "probe result not reported")
+	if !strings.Contains(failed.LastError, "macro M92 failed at line 1") {
+		t.Fatalf("probe failure lacks macro context: %q", failed.LastError)
+	}
+	if point, ok := controller.LastProbePoint(); ok {
+		t.Fatalf("missing-result probe stored LastProbePoint %+v", point)
+	}
+}
+
+func TestDDGoRunProbeFailurePreservesPreviousLastProbeAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	installProbeMacro(t, controller, "G38.2 Z-5 F100", nil)
+	startLoadedProgram(t, controller, "probe-before-failure.gcode", "M92\n")
+	requireProgramCompleted(t, controller, 1)
+	want := macro.Point{X: 0, Y: 0, Z: -3.5}
+	if point, ok := controller.LastProbePoint(); !ok || point != want {
+		t.Fatalf("LastProbePoint after success = %+v, %v", point, ok)
+	}
+
+	installProbeMacro(t, controller, "G38.2 Z-1 F100", nil)
+	startLoadedProgram(t, controller, "probe-after-success.gcode", "M92\n")
+	requireProgramFailedWithError(t, controller, "probe did not contact")
+	if point, ok := controller.LastProbePoint(); !ok || point != want {
+		t.Fatalf("LastProbePoint after failure = %+v, %v; want %+v, true", point, ok, want)
+	}
 }
 
 func TestDDGoProgramSendUnsupportedLineAgainstMock(t *testing.T) {
