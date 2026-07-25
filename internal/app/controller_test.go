@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,70 @@ func TestControllerRefreshPorts(t *testing.T) {
 	if got, want := second.Ports[0].Name, "/dev/ttyACM0"; got != want {
 		t.Fatalf("second refresh name = %q, want %q", got, want)
 	}
+}
+
+func TestProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
+	tr := newBlockingProgramTransport()
+	t.Cleanup(tr.release)
+	controller := NewController(tr, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	path := writeProgramFile(t, "backlog.gcode", "$G\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	if got := waitForTransportWrite(t, tr.writes); got != "$G" {
+		t.Fatalf("write = %q, want $G", got)
+	}
+	for i := 0; i < 65; i++ {
+		tr.events <- transport.Event{Kind: transport.EventRX, When: time.Now(), Text: "ok"}
+	}
+	state := waitForState(t, controller, func(s State) bool {
+		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "program response backlog full")
+	})
+	if state.ProgramComplete != 0 {
+		t.Fatalf("ProgramComplete = %d, want 0", state.ProgramComplete)
+	}
+	requireControllerErrorEventContaining(t, controller.Events(), "program response backlog full")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() after backlog failure = %v", err)
+	}
+}
+
+func TestProgramQueryResponseBacklogOverflowFailsProgram(t *testing.T) {
+	tr := newBlockingProgramTransport()
+	t.Cleanup(tr.release)
+	controller := NewController(tr, nil)
+	controller.statusPollInterval = time.Hour
+	controller.SetMotionRewriter(appTestQueryRewriter{})
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	path := writeProgramFile(t, "query-backlog.gcode", "$G\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	if got := waitForTransportWrite(t, tr.writes); got != "$#" {
+		t.Fatalf("write = %q, want $#", got)
+	}
+	for i := 0; i < 257; i++ {
+		tr.events <- transport.Event{Kind: transport.EventRX, When: time.Now(), Text: fmt.Sprintf("[NOISE:%03d]", i)}
+	}
+	state := waitForState(t, controller, func(s State) bool {
+		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "program response backlog full")
+	})
+	if state.ProgramComplete != 0 {
+		t.Fatalf("ProgramComplete = %d, want 0", state.ProgramComplete)
+	}
+	requireControllerErrorEventContaining(t, controller.Events(), "program response backlog full")
 }
 
 func TestControllerRefreshPorts_Errors(t *testing.T) {
@@ -2623,6 +2688,74 @@ func assertNoEventKind(t *testing.T, ch <-chan Event, kind EventKind) {
 			}
 		case <-timer.C:
 			return
+		}
+	}
+}
+
+type blockingProgramTransport struct {
+	events       chan transport.Event
+	writes       chan string
+	releaseWrite chan struct{}
+	releaseOnce  sync.Once
+}
+
+func newBlockingProgramTransport() *blockingProgramTransport {
+	return &blockingProgramTransport{
+		events:       make(chan transport.Event, 2048),
+		writes:       make(chan string, 10),
+		releaseWrite: make(chan struct{}),
+	}
+}
+
+func (t *blockingProgramTransport) Events() <-chan transport.Event                   { return t.events }
+func (t *blockingProgramTransport) Open(context.Context, transport.PortConfig) error { return nil }
+func (t *blockingProgramTransport) Close() error {
+	t.release()
+	return nil
+}
+func (t *blockingProgramTransport) Write(ctx context.Context, msg transport.Message) error {
+	t.writes <- msg.Display
+	select {
+	case <-t.releaseWrite:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (t *blockingProgramTransport) release() {
+	t.releaseOnce.Do(func() { close(t.releaseWrite) })
+}
+
+type appTestQueryRewriter struct{}
+
+func (appTestQueryRewriter) RewriteMotion(ctx context.Context, runtime macro.Runtime, line gcode.Line) (string, bool, error) {
+	_, err := runtime.ReadWCSOffsets(ctx)
+	return line.Text, false, err
+}
+
+func waitForTransportWrite(t *testing.T, writes <-chan string) string {
+	t.Helper()
+	select {
+	case write := <-writes:
+		return write
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for transport write")
+		return ""
+	}
+}
+
+func requireControllerErrorEventContaining(t *testing.T, events <-chan Event, want string) {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Kind == EventError && strings.Contains(event.Text, want) {
+				return
+			}
+		case <-timer.C:
+			t.Fatalf("timed out waiting for controller error containing %q", want)
 		}
 	}
 }
