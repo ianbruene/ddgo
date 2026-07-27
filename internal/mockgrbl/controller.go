@@ -20,6 +20,7 @@ type Controller struct {
 	clock                      Clock
 	state                      State
 	pos                        [3]float64
+	wcsOffsets                 [6][3]float64
 	active                     *Move
 	queue                      []queuedMove
 	rx                         []byte
@@ -286,20 +287,17 @@ func (c *Controller) handleWCSWrite(norm string) []string {
 	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return c.errorLine(norm, "WCS write unsupported", 20)
 	}
+	axisIndex := map[byte]int{'X': 0, 'Y': 1, 'Z': 2}[axis]
+	c.wcsOffsets[parameter-1][axisIndex] = parsed
 
 	return c.emit(c.fw.OK())
 }
 func (c *Controller) wcsOffsetsResponse() string {
-	lines := []string{
-		"[MSG:wcs-dump]",
-		"[G54:0.000,0.000,0.000]",
-		"[G55:0.000,0.000,0.000]",
-		"[G56:0.000,0.000,0.000]",
-		"[G57:0.000,0.000,0.000]",
-		"[G58:0.000,0.000,0.000]",
-		"[G59:0.000,0.000,0.000]",
-		c.fw.OK(),
+	lines := []string{"[MSG:wcs-dump]"}
+	for i, offset := range c.wcsOffsets {
+		lines = append(lines, fmt.Sprintf("[G%d:%.3f,%.3f,%.3f]", 54+i, offset[0], offset[1], offset[2]))
 	}
+	lines = append(lines, c.fw.OK())
 	return strings.Join(lines, c.fw.LineEnding)
 }
 
