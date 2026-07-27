@@ -2178,6 +2178,166 @@ func TestDDGoProgramSendAcceptedAgainstMock(t *testing.T) {
 	requireControllerIdle(t, controller)
 }
 
+func TestDDGoDefaultM107M108NumericWritesWCSAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m107-m108-numeric.gcode", "M107 depth -1.25\nM108 depth G54Z\n$#\n")); err != nil {
+		t.Fatalf("load numeric macro program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedControllerProgram(t, controller)
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G10L2P1Z-1.250000") && hasMockLogEntry(events, "command", "$#")
+	})
+	assertNoMockCommandPrefix(t, events, "M107", "M108")
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[G54:0.000,0.000,-1.250]") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 3)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoDefaultM107M108CopyWCSAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m107-m108-copy.gcode", "G10 L2 P1 Z-3.500000\nM107 depth G54Z\nM108 depth G55Z\n$#\n")); err != nil {
+		t.Fatalf("load WCS copy macro program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedControllerProgram(t, controller)
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "G10L2P1Z-3.500000") &&
+			countMockEvents(events, "command", "$#") >= 2 &&
+			hasMockLogEntry(events, "command", "G10L2P2Z-3.500000")
+	})
+	assertNoMockCommandPrefix(t, events, "M107", "M108")
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[G54:0.000,0.000,-3.500]") &&
+			hasMockResponse(responses, "[G55:0.000,0.000,-3.500]")
+	})
+	requireProgramCompleted(t, controller, 4)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoDefaultM100WritesMidpointAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m100-midpoint.gcode", "G10 L2 P1 X1.000000\nG10 L2 P2 X3.000000\nM100 G54X G55X G56X\n$#\n")); err != nil {
+		t.Fatalf("load midpoint macro program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedControllerProgram(t, controller)
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockCommandSequence(events, "G10L2P1X1.000000", "G10L2P2X3.000000", "$#", "G10L2P3X2.000000", "$#")
+	})
+	assertNoMockCommandPrefix(t, events, "M100")
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[G56:2.000,0.000,0.000]")
+	})
+	requireProgramCompleted(t, controller, 4)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoDefaultM101PassAllowsNextLineAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMockWithEvents(t, m).Controller
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m101-pass.gcode", "G10 L2 P1 X1.000000\nG10 L2 P2 X1.005000\nM101 G54X G55X 0.010\n$G\n")); err != nil {
+		t.Fatalf("load passing comparison program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter, eventsAfter := mockResponseCount(t, m), mockEventCount(t, m)
+	startLoadedControllerProgram(t, controller)
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockCommandSequence(events, "G10L2P1X1.000000", "G10L2P2X1.005000", "$#", "$G")
+	})
+	assertNoMockCommandPrefix(t, events, "M101")
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[GC:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 4)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+}
+
+func TestDDGoDefaultM101FailurePreventsNextLineAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m101-failure.gcode", "G10 L2 P1 X1.000000\nG10 L2 P2 X1.010000\nM101 G54X G55X 0.001\n$G\n")); err != nil {
+		t.Fatalf("load failing comparison program: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	eventsAfter, controllerEventsAfter := mockEventCount(t, m), h.eventCount()
+	startLoadedControllerProgram(t, controller)
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockCommandSequence(events, "G10L2P1X1.000000", "G10L2P2X1.010000", "$#")
+	})
+	assertNoMockCommandPrefix(t, events, "M101")
+	failed := requireProgramFailedWithError(t, controller, "WCS comparison failed")
+	if !strings.Contains(failed.LastError, "macro M101 failed at line 3") {
+		t.Fatalf("comparison failure lacks macro context: %q", failed.LastError)
+	}
+	if failed.ProgramComplete != 2 || failed.ProgramComplete == failed.ProgramTotal {
+		t.Fatalf("failed program progress = %d/%d, want 2/4", failed.ProgramComplete, failed.ProgramTotal)
+	}
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "WCS comparison failed")
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G", "M101")
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	recoveryResponses := mockResponseCount(t, m)
+	startLoadedProgram(t, controller, "m101-failure-recovery.gcode", "$I\n")
+	waitForNewMockResponses(t, m, recoveryResponses, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompleted(t, controller, 1)
+}
+
+func hasMockCommandSequence(events []mockLogEntry, commands ...string) bool {
+	next := 0
+	for _, event := range events {
+		if event.Kind == "command" && next < len(commands) && event.Text == commands[next] {
+			next++
+		}
+	}
+	return next == len(commands)
+}
+
+func startLoadedControllerProgram(t *testing.T, controller *app.Controller) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start program: %v", err)
+	}
+}
+
+func assertNoMockCommandPrefix(t *testing.T, events []mockLogEntry, prefixes ...string) {
+	t.Helper()
+	for _, event := range events {
+		if event.Kind != "command" {
+			continue
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(event.Text, prefix) {
+				t.Fatalf("raw macro command with prefix %q reached mock: %+v", prefix, events)
+			}
+		}
+	}
+}
+
 func installProbeMacro(t *testing.T, controller *app.Controller, command string, result chan<- macro.Point) {
 	t.Helper()
 	registry := macro.NewRegistry()

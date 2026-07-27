@@ -174,6 +174,46 @@ func TestWCSWriteAccepted(t *testing.T) {
 	}
 }
 
+func TestWCSWriteReadback(t *testing.T) {
+	c, _ := testCtl()
+	if out := joined(c.ProcessBytes([]byte("G10 L2 P1 Z-1.250000\n"))); !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("write response = %q, want terminal ok", out)
+	}
+	out := joined(c.ProcessBytes([]byte("$#\n")))
+	for _, want := range []string{
+		"[G54:0.000,0.000,-1.250]", "[G55:0.000,0.000,0.000]",
+		"[G56:0.000,0.000,0.000]", "[G57:0.000,0.000,0.000]",
+		"[G58:0.000,0.000,0.000]", "[G59:0.000,0.000,0.000]",
+	} {
+		if !strings.Contains(out, want+"\r\n") {
+			t.Fatalf("readback missing %q: %q", want, out)
+		}
+	}
+	if !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("readback response = %q, want terminal ok", out)
+	}
+}
+
+func TestWCSWriteReadbackIsIsolated(t *testing.T) {
+	c, _ := testCtl()
+	for _, command := range []string{"G10 L2 P2 X2.000000\n", "G10 L2 P6 Y-4.500000\n"} {
+		if out := joined(c.ProcessBytes([]byte(command))); !strings.HasSuffix(out, "ok\r\n") {
+			t.Fatalf("write %q response = %q, want terminal ok", command, out)
+		}
+	}
+	out := joined(c.ProcessBytes([]byte("$#\n")))
+	for _, want := range []string{
+		"[G54:0.000,0.000,0.000]", "[G55:2.000,0.000,0.000]", "[G59:0.000,-4.500,0.000]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("readback missing %q: %q", want, out)
+		}
+	}
+	if got := c.Snapshot().State; got != StateIdle {
+		t.Fatalf("state = %q, want %q", got, StateIdle)
+	}
+}
+
 func TestWCSWriteRejected(t *testing.T) {
 	tests := []struct {
 		line       string
@@ -183,6 +223,7 @@ func TestWCSWriteRejected(t *testing.T) {
 		{"G10 L2 P7 Z1\n", "G10L2P7Z1"},
 		{"G10 L2 P1 A1\n", "G10L2P1A1"},
 		{"G10 L2 P1 Zbad\n", "G10L2P1ZBAD"},
+		{"G10 L2 P1 X1 Y2\n", "G10L2P1X1Y2"},
 		{"G10 L20 P1 Z1\n", "G10L20P1Z1"},
 	}
 
