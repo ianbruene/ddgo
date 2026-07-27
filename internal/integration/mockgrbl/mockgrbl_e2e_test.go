@@ -2196,7 +2196,7 @@ func TestDDGoDefaultM107M108NumericWritesWCSAgainstMock(t *testing.T) {
 	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
 		return hasMockResponse(responses, "[G54:0.000,0.000,-1.250]") && hasMockResponse(responses, "ok")
 	})
-	requireProgramCompleted(t, controller, 3)
+	requireProgramCompletedClean(t, controller, 3)
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }
@@ -2221,7 +2221,7 @@ func TestDDGoDefaultM107M108CopyWCSAgainstMock(t *testing.T) {
 		return hasMockResponse(responses, "[G54:0.000,0.000,-3.500]") &&
 			hasMockResponse(responses, "[G55:0.000,0.000,-3.500]")
 	})
-	requireProgramCompleted(t, controller, 4)
+	requireProgramCompletedClean(t, controller, 4)
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }
@@ -2243,7 +2243,7 @@ func TestDDGoDefaultM100WritesMidpointAgainstMock(t *testing.T) {
 	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
 		return hasMockResponse(responses, "[G56:2.000,0.000,0.000]")
 	})
-	requireProgramCompleted(t, controller, 4)
+	requireProgramCompletedClean(t, controller, 4)
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }
@@ -2265,7 +2265,7 @@ func TestDDGoDefaultM101PassAllowsNextLineAgainstMock(t *testing.T) {
 	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
 		return hasMockResponse(responses, "[GC:") && hasMockResponse(responses, "ok")
 	})
-	requireProgramCompleted(t, controller, 4)
+	requireProgramCompletedClean(t, controller, 4)
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 }
@@ -2302,7 +2302,9 @@ func TestDDGoDefaultM101FailurePreventsNextLineAgainstMock(t *testing.T) {
 	waitForNewMockResponses(t, m, recoveryResponses, 5*time.Second, func(responses []mockLogEntry) bool {
 		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
 	})
-	requireProgramCompleted(t, controller, 1)
+	requireProgramCompletedClean(t, controller, 1)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
 }
 
 func hasMockCommandSequence(events []mockLogEntry, commands ...string) bool {
@@ -2451,12 +2453,16 @@ func TestDDGoRunProbeControllerErrorFailsAndRecoversAgainstMock(t *testing.T) {
 	waitForNewMockResponses(t, m, recoveryResponses, 5*time.Second, func(responses []mockLogEntry) bool {
 		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
 	})
-	requireProgramCompleted(t, controller, 1)
+	requireProgramCompletedClean(t, controller, 1)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
 }
 
 func TestDDGoRunProbeMissingResultFailsAgainstMock(t *testing.T) {
 	m := startMockGRBLWithOptions(t, mockGRBLOptions{ProbeOmitResultFor: "G38.2Z-5F100"})
-	controller := connectControllerToMockWithEvents(t, m).Controller
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+	controllerEventsAfter := h.eventCount()
 	installProbeMacro(t, controller, "G38.2 Z-5 F100", nil)
 	eventsAfter := mockEventCount(t, m)
 	startLoadedProgram(t, controller, "missing-result-probe.gcode", "M92\n")
@@ -2470,6 +2476,9 @@ func TestDDGoRunProbeMissingResultFailsAgainstMock(t *testing.T) {
 	if point, ok := controller.LastProbePoint(); ok {
 		t.Fatalf("missing-result probe stored LastProbePoint %+v", point)
 	}
+	events := h.eventsAfter(controllerEventsAfter)
+	assertControllerEventsContainText(t, events, "ok")
+	assertControllerEventsDoNotContainText(t, events, "[PRB:")
 }
 
 func TestDDGoRunProbeFailurePreservesPreviousLastProbeAgainstMock(t *testing.T) {
@@ -3081,6 +3090,25 @@ func countControllerEventText(events []app.Event, text string) int {
 	return count
 }
 
+func assertControllerEventsContainText(t *testing.T, events []app.Event, text string) {
+	t.Helper()
+	for _, event := range events {
+		if strings.Contains(event.Text, text) {
+			return
+		}
+	}
+	t.Fatalf("controller events do not contain %q; events=%+v", text, events)
+}
+
+func assertControllerEventsDoNotContainText(t *testing.T, events []app.Event, text string) {
+	t.Helper()
+	for _, event := range events {
+		if strings.Contains(event.Text, text) {
+			t.Fatalf("controller events contain forbidden text %q; events=%+v", text, events)
+		}
+	}
+}
+
 func requireProgramErrorEvent(t *testing.T, h *controllerHarness, after int, text string) {
 	t.Helper()
 	h.waitForEventsAfter(t, after, 5*time.Second, func(events []app.Event) bool {
@@ -3169,6 +3197,16 @@ func requireProgramCompleted(t *testing.T, c *app.Controller, total int) {
 			snapshot.ProgramTotal == total &&
 			snapshot.LastError == ""
 	})
+}
+
+func requireProgramCompletedClean(t *testing.T, c *app.Controller, total int) app.State {
+	t.Helper()
+	requireProgramCompleted(t, c, total)
+	state := c.Snapshot()
+	if state.LastError != "" {
+		t.Fatalf("LastError = %q, want empty after completed program", state.LastError)
+	}
+	return state
 }
 
 func programStatusIsAny(status app.ProgramStatus, allowed ...app.ProgramStatus) bool {
