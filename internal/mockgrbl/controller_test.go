@@ -378,6 +378,51 @@ func TestMalformedAndHardLimit(t *testing.T) {
 	}
 }
 
+func TestPendingSerialDrainsOnNextSerialByte(t *testing.T) {
+	c, _ := testCtl()
+	c.queueSerial([]string{"ALARM:1\r\n"})
+
+	out := joined(c.ProcessBytes([]byte("?")))
+	if !strings.HasPrefix(out, "ALARM:1\r\n") || !strings.Contains(out, "<Idle|") {
+		t.Fatalf("pending serial output = %q", out)
+	}
+	if !hasLog(c.responses, "response", "ALARM:1") {
+		t.Fatalf("pending response not logged: %+v", c.responses)
+	}
+}
+
+func TestPendingSerialDrainsOnlyOnce(t *testing.T) {
+	c, _ := testCtl()
+	c.queueSerial([]string{"ALARM:1\r\n"})
+
+	first := joined(c.ProcessBytes([]byte("?")))
+	second := joined(c.ProcessBytes([]byte("?")))
+	if !strings.Contains(first, "ALARM:1\r\n") {
+		t.Fatalf("first output = %q, want pending alarm", first)
+	}
+	if strings.Contains(second, "ALARM:1") {
+		t.Fatalf("second output = %q, contains drained alarm", second)
+	}
+}
+
+func TestResetClearsPendingSerial(t *testing.T) {
+	c, _ := testCtl()
+	c.queueSerial([]string{"ALARM:1\r\n"})
+
+	out := joined(c.ProcessBytes([]byte{0x18}))
+	for _, want := range []string{"[MSG:reset]", "ALARM:3", "Grbl 1.1g [help:'$']"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("reset output = %q, want %q", out, want)
+		}
+	}
+	if strings.Contains(out, "ALARM:1") {
+		t.Fatalf("reset output = %q, contains stale alarm", out)
+	}
+	if later := joined(c.ProcessBytes([]byte("?"))); strings.Contains(later, "ALARM:1") {
+		t.Fatalf("post-reset output = %q, contains stale alarm", later)
+	}
+}
+
 func TestHardLimitMaterializesPositionAndEntersAlarm(t *testing.T) {
 	c, clk := testCtl()
 	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
