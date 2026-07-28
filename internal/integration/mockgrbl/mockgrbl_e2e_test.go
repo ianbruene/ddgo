@@ -1907,6 +1907,94 @@ func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
 	}
 }
 
+func TestDDGoReconnectsAfterIdleMockProcessExit(t *testing.T) {
+	first := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, first)
+	controller := h.Controller
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	eventsAfter := h.eventCount()
+
+	first.stopNow(t)
+	disconnected := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return !state.Connected && state.MachineState == "" &&
+			!state.HasMachinePosition && state.LastStatusRaw == ""
+	})
+	if disconnected.LastError != "" {
+		t.Fatalf("LastError after idle transport loss = %q, want empty", disconnected.LastError)
+	}
+	h.waitForEventsAfter(t, eventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventStateChanged, "transport disconnected")
+	})
+
+	second := startMockGRBL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := controller.Connect(ctx, transport.DefaultPortConfig(second.SerialPath)); err != nil {
+		t.Fatalf("reconnect controller to second mock: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter := mockResponseCount(t, second)
+	if err := controller.SendConsoleLine(ctx, "$I"); err != nil {
+		t.Fatalf("send $I after reconnect: %v", err)
+	}
+	waitForNewMockResponses(t, second, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	if state := controller.Snapshot(); state.LastError != "" {
+		t.Fatalf("LastError after reconnect = %q, want empty; state=%+v", state.LastError, state)
+	}
+}
+
+func TestDDGoReconnectsAfterManualJogMockProcessExit(t *testing.T) {
+	first := startMockGRBL(t)
+	controller := connectControllerToMock(t, first)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := controller.JogTo(ctx, "X", -10, 60); err != nil {
+		t.Fatalf("start jog against first mock: %v", err)
+	}
+	waitForMockState(t, first, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil && state.MachinePosition[0] < -0.01
+	})
+
+	first.stopNow(t)
+	disconnected := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return !state.Connected && state.MachineState == "" && !state.HasMachinePosition
+	})
+	if disconnected.LastError != "" {
+		t.Fatalf("LastError after jog transport loss = %q, want empty", disconnected.LastError)
+	}
+
+	second := startMockGRBL(t)
+	if err := controller.Connect(ctx, transport.DefaultPortConfig(second.SerialPath)); err != nil {
+		t.Fatalf("reconnect controller to second mock: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter := mockResponseCount(t, second)
+	if err := controller.JogTo(ctx, "X", -1, 60); err != nil {
+		t.Fatalf("start jog against second mock: %v", err)
+	}
+	waitForNewMockResponses(t, second, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+	waitForMockState(t, second, 5*time.Second, func(state mockState) bool {
+		return state.State == "Jog" || (state.ActiveMove == nil && near(state.MachinePosition[0], -1, posTol))
+	})
+	requestStatus(t, controller)
+	final := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState != "Alarm" && state.HasMachinePosition
+	})
+	if final.LastError != "" {
+		t.Fatalf("LastError after second jog = %q, want empty; state=%+v", final.LastError, final)
+	}
+}
+
 func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$G"})
 	h := connectControllerToMockWithEvents(t, m)
@@ -3675,6 +3763,7 @@ func requireLoadedProgram(t *testing.T, c *app.Controller, name string, total in
 
 func transportDropErrorTexts() []string {
 	return []string{
+		"transport disconnected",
 		"context deadline exceeded",
 		"input/output error",
 		"device not configured",
