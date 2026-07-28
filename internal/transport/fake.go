@@ -76,6 +76,13 @@ func (f *FakeTransport) InjectError(err error) {
 	f.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error()}
 }
 
+func (f *FakeTransport) InjectDisconnected() {
+	f.mu.Lock()
+	f.open = false
+	f.mu.Unlock()
+	f.events <- Event{Kind: EventDisconnected, When: time.Now()}
+}
+
 func (f *FakeTransport) Written() []Message {
 	f.mu.Lock()
 	defer f.mu.Unlock()

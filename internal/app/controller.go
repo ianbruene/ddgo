@@ -662,6 +662,51 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
 }
 
+func (c *Controller) handleTransportDisconnected() {
+	c.stopStatusPolling()
+
+	err := errors.New("transport disconnected")
+	var cancel context.CancelFunc
+	c.mu.Lock()
+	run := c.run
+	if run != nil {
+		c.run = nil
+		c.state.ProgramStatus = ProgramFailed
+		c.state.LastError = err.Error()
+		c.contour.Disable()
+		cancel = run.cancel
+	} else {
+		c.state.LastError = ""
+	}
+	changed := c.state.Connected ||
+		c.state.MachineState != "" ||
+		c.state.HasMachinePosition ||
+		c.state.HasWorkPosition ||
+		c.state.HasWorkCoordinateOffset ||
+		c.state.HasFeedSpindle ||
+		c.state.LastStatusRaw != ""
+	c.state.Connected = false
+	c.state.MachineState = ""
+	c.state.HasMachinePosition = false
+	c.state.HasWorkPosition = false
+	c.state.WorkCoordinateOffset = [3]float64{}
+	c.state.HasWorkCoordinateOffset = false
+	c.state.HasFeedSpindle = false
+	c.state.LastStatusRaw = ""
+	state := c.state
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if changed || run != nil {
+		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: err.Error()}
+	}
+	if run != nil {
+		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
+	}
+}
+
 func (c *Controller) ReadWCSOffsets(ctx context.Context) (macro.WCSOffsets, error) {
 	lines, err := c.SendLineCollectingResponses(ctx, "$#")
 	if err != nil {
@@ -758,8 +803,10 @@ func (c *Controller) runTransportEventBridge() {
 	for ev := range c.transport.Events() {
 		snapshot := c.Snapshot()
 		switch ev.Kind {
-		case transport.EventConnected, transport.EventDisconnected:
+		case transport.EventConnected:
 			continue
+		case transport.EventDisconnected:
+			c.handleTransportDisconnected()
 		case transport.EventTX:
 			if !ev.SuppressLog {
 				c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}

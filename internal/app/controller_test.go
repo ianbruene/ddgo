@@ -46,6 +46,83 @@ func TestControllerRefreshPorts(t *testing.T) {
 	}
 }
 
+func TestControllerHandlesTransportDisconnectedWhileIdle(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	fake.InjectRX("<Idle|M:1.000,2.000,3.000|B:15,128|L:0|0000>")
+	waitForState(t, controller, func(s State) bool {
+		return s.Connected && s.MachineState == "Idle" && s.HasMachinePosition
+	})
+
+	fake.InjectDisconnected()
+	state := waitForState(t, controller, func(s State) bool {
+		return !s.Connected && s.MachineState == "" && !s.HasMachinePosition &&
+			!s.HasWorkPosition && !s.HasWorkCoordinateOffset && !s.HasFeedSpindle &&
+			s.LastStatusRaw == ""
+	})
+	if state.LastError != "" {
+		t.Fatalf("LastError = %q, want empty", state.LastError)
+	}
+	waitForEventText(t, controller.Events(), EventStateChanged, "transport disconnected")
+}
+
+func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	path := writeProgramFile(t, "disconnect.gcode", "$G\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+
+	fake.InjectDisconnected()
+	state := waitForState(t, controller, func(s State) bool {
+		return !s.Connected && s.ProgramStatus == ProgramFailed &&
+			strings.Contains(s.LastError, "transport disconnected")
+	})
+	if state.ProgramComplete != 0 {
+		t.Fatalf("ProgramComplete = %d, want 0", state.ProgramComplete)
+	}
+	requireControllerErrorEventContaining(t, controller.Events(), "transport disconnected")
+}
+
+func TestControllerReconnectsAfterTransportDisconnected(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake1")); err != nil {
+		t.Fatalf("first Connect() error = %v", err)
+	}
+	fake.InjectDisconnected()
+	waitForState(t, controller, func(s State) bool { return !s.Connected })
+
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake2")); err != nil {
+		t.Fatalf("second Connect() error = %v", err)
+	}
+	state := controller.Snapshot()
+	if !state.Connected || state.PortName != "fake2" || state.LastError != "" {
+		t.Fatalf("state after reconnect = %+v", state)
+	}
+	fake.InjectRX("<Idle|MPos:4.000,5.000,6.000>")
+	state = waitForState(t, controller, func(s State) bool {
+		return s.Connected && s.MachineState == "Idle" && s.HasMachinePosition
+	})
+	if got, want := state.MachinePosition, [3]float64{4, 5, 6}; got != want {
+		t.Fatalf("MachinePosition = %v, want %v", got, want)
+	}
+}
+
 func TestProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	tr := newBlockingProgramTransport()
 	t.Cleanup(tr.release)

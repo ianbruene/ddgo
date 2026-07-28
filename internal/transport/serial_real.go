@@ -115,10 +115,16 @@ func (t *SerialTransport) readLoop(closed <-chan struct{}, port serial.Port) {
 		}
 		n, err := port.Read(buf)
 		if err != nil {
+			select {
+			case <-closed:
+				return
+			default:
+			}
 			if errors.Is(err, io.EOF) || strings.Contains(strings.ToLower(err.Error()), "closed") {
+				t.markUnexpectedDisconnected(port, nil)
 				return
 			}
-			t.events <- Event{Kind: EventError, When: time.Now(), Err: err}
+			t.markUnexpectedDisconnected(port, err)
 			return
 		}
 		if n == 0 {
@@ -126,6 +132,22 @@ func (t *SerialTransport) readLoop(closed <-chan struct{}, port serial.Port) {
 		}
 		t.consume(buf[:n])
 	}
+}
+
+func (t *SerialTransport) markUnexpectedDisconnected(port serial.Port, err error) {
+	t.mu.Lock()
+	if t.port != port {
+		t.mu.Unlock()
+		return
+	}
+	t.port = nil
+	t.closed = nil
+	t.mu.Unlock()
+
+	if err != nil {
+		t.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error()}
+	}
+	t.events <- Event{Kind: EventDisconnected, When: time.Now()}
 }
 
 func (t *SerialTransport) consume(chunk []byte) {
