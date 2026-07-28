@@ -1730,6 +1730,89 @@ func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
 	}
 }
 
+func TestDDGoProgramFailsWhenHardLimitOccursDuringAckWaitAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$G"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programName := "program-hard-limit-ack-wait.gcode"
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, programName, "$G\n")); err != nil {
+		t.Fatalf("load hard-limit ack-wait program: %v", err)
+	}
+	requireLoadedProgram(t, controller, programName, 1)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	eventsAfter, controllerEventsAfter := mockEventCount(t, m), h.eventCount()
+	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start hard-limit ack-wait program: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G")
+	})
+	postMockHardLimit(t, m, "X")
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventConsoleRX, "[MSG:Limit X]") &&
+			hasControllerEventKindText(events, app.EventConsoleRX, "ALARM:1")
+	})
+
+	failed := requireProgramFailedWithError(t, controller, "program failed at line 1: ALARM:1")
+	if failed.ProgramStatus != app.ProgramFailed || failed.ProgramComplete != 0 {
+		t.Fatalf("hard-limit failure state = %+v, want failed with zero progress", failed)
+	}
+	requireProgramErrorEvent(t, h, controllerEventsAfter, "ALARM:1")
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState == "Alarm" && strings.Contains(state.LastError, "ALARM:1")
+	})
+	requireUnlockAndRecoveryProgram(t, controller, m, "recovery-after-ack-alarm.gcode")
+}
+
+func TestDDGoProgramFailsWhenHardLimitOccursDuringMacroQueryAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$#"})
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	programName := "program-hard-limit-macro-query.gcode"
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, programName, "M107 depth G54Z\n$G\n")); err != nil {
+		t.Fatalf("load hard-limit macro-query program: %v", err)
+	}
+	requireLoadedProgram(t, controller, programName, 2)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	eventsAfter, controllerEventsAfter := mockEventCount(t, m), h.eventCount()
+	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start hard-limit macro-query program: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$#")
+	})
+	postMockHardLimit(t, m, "Y")
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventConsoleRX, "[MSG:Limit Y]") &&
+			hasControllerEventKindText(events, app.EventConsoleRX, "ALARM:1")
+	})
+
+	failed := requireProgramFailedWithError(t, controller, "query command failed: ALARM:1")
+	if !strings.Contains(failed.LastError, "macro M107 failed at line 1") {
+		t.Fatalf("macro alarm failure lacks macro context: %q", failed.LastError)
+	}
+	if failed.ProgramStatus != app.ProgramFailed || failed.ProgramComplete != 0 {
+		t.Fatalf("macro alarm failure state = %+v, want failed with zero progress", failed)
+	}
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G")
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState == "Alarm"
+	})
+	requireUnlockAndRecoveryProgram(t, controller, m, "recovery-after-query-alarm.gcode")
+}
+
 func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T) {
 	m := startMockGRBLHoldingResponseFor(t, "$G")
 	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate
@@ -3655,6 +3738,44 @@ func requireProgramCompletedClean(t *testing.T, c *app.Controller, total int) ap
 		t.Fatalf("LastError = %q, want empty after completed program", state.LastError)
 	}
 	return state
+}
+
+func requireUnlockAndRecoveryProgram(t *testing.T, controller *app.Controller, m *mockProcess, programName string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	eventsAfter, responsesAfter := mockEventCount(t, m), mockResponseCount(t, m)
+	if err := controller.Action(ctx, grbl.ActionUnlock); err != nil {
+		t.Fatalf("unlock after alarm: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$X")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	path := writeIntegrationProgramFile(t, programName, "$I\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("load recovery program: %v", err)
+	}
+	requireLoadedProgram(t, controller, programName, 1)
+
+	responsesAfter = mockResponseCount(t, m)
+	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer runCancel()
+	if err := controller.StartProgram(runCtx); err != nil {
+		t.Fatalf("start recovery program: %v", err)
+	}
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+	requireProgramCompletedClean(t, controller, 1)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
 }
 
 func programStatusIsAny(status app.ProgramStatus, allowed ...app.ProgramStatus) bool {

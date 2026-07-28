@@ -118,8 +118,11 @@ func (c *Controller) logRealtimeCommand(name string) {
 func (c *Controller) ProcessBytes(bs []byte) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := append([]string(nil), c.pendingSerial...)
-	c.pendingSerial = nil
+	var out []string
+	if len(bs) == 0 || (bs[0] != c.fw.SoftResetByte && bs[0] != c.fw.AlternateResetByte) {
+		out = append(out, c.pendingSerial...)
+		c.pendingSerial = nil
+	}
 	for _, b := range bs {
 		c.reconcile()
 		switch b {
@@ -183,6 +186,9 @@ func (c *Controller) queueSerial(responses []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pendingSerial = append(c.pendingSerial, responses...)
+	for _, response := range responses {
+		c.logResponseLines(response)
+	}
 }
 func (c *Controller) handleLine(raw string) []string {
 	norm := NormalizeLine(raw)
@@ -465,6 +471,7 @@ func (c *Controller) resetLocked() []string {
 	c.queue = nil
 	c.rx = nil
 	c.rxOverflow = false
+	c.pendingSerial = nil
 	c.setState(StateIdle)
 	c.lastErr = "ALARM:3"
 	c.log("reset", "reset")
