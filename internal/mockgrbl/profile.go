@@ -7,18 +7,23 @@ type FirmwareProfile struct {
 	Version                                                                                    string `json:"version"`
 	LineEnding                                                                                 string `json:"line_ending"`
 	StatusByte, CycleStartByte, FeedHoldByte, SoftResetByte, AlternateResetByte, JogCancelByte byte
-	PlannerBlockCapacity                                                                       int    `json:"planner_block_capacity"`
-	SerialRXCapacity                                                                           int    `json:"serial_rx_capacity"`
-	StrictUnsupported                                                                          bool   `json:"strict_unsupported"`
-	JogLimitErrorCode                                                                          int    `json:"jog_limit_error_code"`
-	JogLimitMessage                                                                            string `json:"jog_limit_message"`
-	InvalidJogErrorCode                                                                        int    `json:"invalid_jog_error_code"`
-	InvalidJogMessage                                                                          string `json:"invalid_jog_message"`
-	LineOverflowErrorCode                                                                      int    `json:"line_overflow_error_code"`
-	LineOverflowMessage                                                                        string `json:"line_overflow_message"`
-	BuildDate                                                                                  string `json:"build_date"`
-	GGRevision                                                                                 string `json:"gg_revision"`
-	PCBRevision                                                                                string `json:"pcb_revision"`
+	PlannerBlockCapacity                                                                       int        `json:"planner_block_capacity"`
+	SerialRXCapacity                                                                           int        `json:"serial_rx_capacity"`
+	StatusPositionField                                                                        string     `json:"status_position_field"`
+	StatusWCOEnabled                                                                           bool       `json:"status_wco_enabled"`
+	StatusWCO                                                                                  [3]float64 `json:"status_wco"`
+	StatusFSEnabled                                                                            bool       `json:"status_fs_enabled"`
+	StatusFS                                                                                   [2]float64 `json:"status_fs"`
+	StrictUnsupported                                                                          bool       `json:"strict_unsupported"`
+	JogLimitErrorCode                                                                          int        `json:"jog_limit_error_code"`
+	JogLimitMessage                                                                            string     `json:"jog_limit_message"`
+	InvalidJogErrorCode                                                                        int        `json:"invalid_jog_error_code"`
+	InvalidJogMessage                                                                          string     `json:"invalid_jog_message"`
+	LineOverflowErrorCode                                                                      int        `json:"line_overflow_error_code"`
+	LineOverflowMessage                                                                        string     `json:"line_overflow_message"`
+	BuildDate                                                                                  string     `json:"build_date"`
+	GGRevision                                                                                 string     `json:"gg_revision"`
+	PCBRevision                                                                                string     `json:"pcb_revision"`
 }
 
 func DefaultFirmwareProfile() FirmwareProfile {
