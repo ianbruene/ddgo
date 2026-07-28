@@ -196,6 +196,8 @@ func (c *Controller) handleLine(raw string) []string {
 		c.lastErr = ""
 		return c.emit(c.fw.OK())
 	case "$H":
+		c.active = nil
+		c.queue = nil
 		c.setState(StateHome)
 		c.pos = c.mach.InitialPosition
 		c.setState(StateIdle)

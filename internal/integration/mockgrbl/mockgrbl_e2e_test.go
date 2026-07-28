@@ -649,6 +649,55 @@ func TestMockGRBLHarnessStarts(t *testing.T) {
 	}
 }
 
+func TestMockGRBLDebugResetEndpoint(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -10, 60); err != nil {
+		t.Fatalf("start jog before debug reset: %v", err)
+	}
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil
+	})
+
+	req, err := http.NewRequest(http.MethodPost, m.HTTPBase+"/reset", nil)
+	if err != nil {
+		t.Fatalf("create reset request: %v", err)
+	}
+	resp, err := m.client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /reset: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /reset status = %s", resp.Status)
+	}
+	var resetLines []string
+	if err := json.NewDecoder(resp.Body).Decode(&resetLines); err != nil {
+		t.Fatalf("decode POST /reset response: %v", err)
+	}
+	resetText := strings.Join(resetLines, "")
+	for _, want := range []string{"[MSG:reset]", "ALARM:3", "Grbl 1.1g [help:'$']"} {
+		if !strings.Contains(resetText, want) {
+			t.Fatalf("POST /reset response missing %q: %q", want, resetText)
+		}
+	}
+	state := m.state(t)
+	if state.State != "Idle" || state.ActiveMove != nil || state.QueuedCommandCount != 0 {
+		t.Fatalf("debug reset state = %+v", state)
+	}
+
+	getResp, err := m.client.Get(m.HTTPBase + "/reset")
+	if err != nil {
+		t.Fatalf("GET /reset: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /reset status = %s, want 405", getResp.Status)
+	}
+}
+
 func connectControllerToMock(t *testing.T, m *mockProcess) *app.Controller {
 	t.Helper()
 	controller := app.NewController(transport.NewSerialTransport(), nil)
@@ -2844,6 +2893,93 @@ func TestDDGoQueuedAbsoluteJogSequencingAgainstMock(t *testing.T) {
 	})
 }
 
+func TestDDGoHomeActionAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer jogCancel()
+	if err := controller.JogTo(jogCtx, "X", -1, 60); err != nil {
+		t.Fatalf("jog before home: %v", err)
+	}
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return !near(state.MachinePosition[0], 0, posTol)
+	})
+
+	eventsAfter, responsesAfter := mockEventCount(t, m), mockResponseCount(t, m)
+	homeCtx, homeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer homeCancel()
+	if err := controller.Action(homeCtx, grbl.ActionHome); err != nil {
+		t.Fatalf("home action: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$H")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+
+	requestStatus(t, controller)
+	final := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition &&
+			nearTriple(snapshot.MachinePosition, [3]float64{}, posTol) && snapshot.LastError == ""
+	})
+	if final.LastError != "" {
+		t.Fatalf("home controller state = %+v", final)
+	}
+	mock := m.state(t)
+	if mock.State != "Idle" || mock.ActiveMove != nil || mock.QueuedCommandCount != 0 ||
+		!nearTriple(mock.MachinePosition, [3]float64{}, posTol) {
+		t.Fatalf("home mock state = %+v", mock)
+	}
+}
+
+func TestDDGoManualHoldResumeAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+	eventsAfter := mockEventCount(t, m)
+
+	holdCtx, holdCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer holdCancel()
+	if err := controller.Action(holdCtx, grbl.ActionHold); err != nil {
+		t.Fatalf("manual hold: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 2*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "!")
+	})
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Hold" && snapshot.HasMachinePosition
+	})
+
+	eventsAfter = mockEventCount(t, m)
+	resumeCtx, resumeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer resumeCancel()
+	if err := controller.Action(resumeCtx, grbl.ActionResume); err != nil {
+		t.Fatalf("manual resume: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 2*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "~")
+	})
+	requestStatus(t, controller)
+	final := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+	if final.LastError != "" {
+		t.Fatalf("LastError = %q, want empty; state=%+v", final.LastError, final)
+	}
+}
+
 func TestDDGoRealtimeHoldResumeDuringJogAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMock(t, m)
@@ -2918,6 +3054,86 @@ func TestDDGoRealtimeHoldResumeDuringJogAgainstMock(t *testing.T) {
 			snapshot.MachineState == "Idle" &&
 			near(snapshot.MachinePosition[0], heldX, resetPosTol)
 	})
+}
+
+func TestDDGoSoftResetReportsAlarmAndStartupAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+
+	responsesAfter := mockResponseCount(t, m)
+	eventsAfter := mockEventCount(t, m)
+	controllerEventsAfter := h.eventCount()
+	resetCtx, resetCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer resetCancel()
+	if err := controller.Action(resetCtx, grbl.ActionSoftReset); err != nil {
+		t.Fatalf("soft reset: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "Ctrl-X")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[MSG:reset]") && hasMockResponse(responses, "ALARM:3") &&
+			hasMockResponse(responses, "Grbl 1.1g [help:'$']")
+	})
+	controllerEvents := h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventConsoleRX, "[MSG:reset]") &&
+			hasControllerEventKindText(events, app.EventConsoleRX, "ALARM:3") &&
+			hasControllerEventKindText(events, app.EventConsoleRX, "Grbl 1.1g [help:'$']")
+	})
+	assertNoControllerEventKind(t, controllerEvents, app.EventError)
+
+	requestStatus(t, controller)
+	final := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+	if final.LastError != "" {
+		t.Fatalf("post-reset LastError = %q, want empty; state=%+v", final.LastError, final)
+	}
+}
+
+func TestDDGoUnlockAfterSoftResetAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+	baseline := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+
+	responsesAfter := mockResponseCount(t, m)
+	resetCtx, resetCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer resetCancel()
+	if err := controller.Action(resetCtx, grbl.ActionSoftReset); err != nil {
+		t.Fatalf("soft reset before unlock: %v", err)
+	}
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ALARM:3")
+	})
+
+	eventsAfter, responsesAfter := mockEventCount(t, m), mockResponseCount(t, m)
+	unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer unlockCancel()
+	if err := controller.Action(unlockCtx, grbl.ActionUnlock); err != nil {
+		t.Fatalf("unlock after reset: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$X")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+
+	requestStatus(t, controller)
+	final := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
+	})
+	if final.LastError != "" || final.ProgramStatus != baseline.ProgramStatus || final.ProgramStatus.IsActive() {
+		t.Fatalf("post-unlock controller state = %+v; baseline=%+v", final, baseline)
+	}
 }
 
 func TestDDGoRealtimeResetDuringJogAgainstMock(t *testing.T) {
@@ -3300,6 +3516,24 @@ func hasControllerEventText(events []app.Event, text string) bool {
 		}
 	}
 	return false
+}
+
+func hasControllerEventKindText(events []app.Event, kind app.EventKind, text string) bool {
+	for _, event := range events {
+		if event.Kind == kind && strings.Contains(event.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func assertNoControllerEventKind(t *testing.T, events []app.Event, kind app.EventKind) {
+	t.Helper()
+	for _, event := range events {
+		if event.Kind == kind {
+			t.Fatalf("unexpected controller event kind %q: %+v", kind, events)
+		}
+	}
 }
 
 func near(got, want, tol float64) bool {
