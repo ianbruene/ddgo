@@ -11,6 +11,50 @@ func testCtl() (*Controller, *ManualClock) {
 	return NewController(DefaultFirmwareProfile(), DefaultMachineProfile(), clk), clk
 }
 func joined(v []string) string { return strings.Join(v, "") }
+
+func TestStatusReportDefaultUsesM(t *testing.T) {
+	c, _ := testCtl()
+	out := joined(c.ProcessBytes([]byte("?")))
+	if !strings.Contains(out, "<Idle|M:0.000,0.000,0.000|") {
+		t.Fatalf("status response = %q", out)
+	}
+	for _, unwanted := range []string{"|MPos:", "|WPos:", "|FS:"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("status response contains %q: %q", unwanted, out)
+		}
+	}
+}
+
+func TestStatusReportPositionFieldVariants(t *testing.T) {
+	for _, field := range []string{"MPos", "WPos", "W"} {
+		t.Run(field, func(t *testing.T) {
+			fw := DefaultFirmwareProfile()
+			fw.StatusPositionField = field
+			c := NewController(fw, DefaultMachineProfile(), &ManualClock{T: time.Unix(0, 0)})
+			out := joined(c.ProcessBytes([]byte("?")))
+			want := "<Idle|" + field + ":0.000,0.000,0.000|"
+			if !strings.Contains(out, want) || !strings.HasSuffix(out, fw.LineEnding) {
+				t.Fatalf("status response = %q, want %q and terminal %q", out, want, fw.LineEnding)
+			}
+		})
+	}
+}
+
+func TestStatusReportIncludesWCOAndFS(t *testing.T) {
+	fw := DefaultFirmwareProfile()
+	fw.StatusPositionField = "M"
+	fw.StatusWCOEnabled = true
+	fw.StatusWCO = [3]float64{1, 2, -3.5}
+	fw.StatusFSEnabled = true
+	fw.StatusFS = [2]float64{123, 456}
+	c := NewController(fw, DefaultMachineProfile(), &ManualClock{T: time.Unix(0, 0)})
+	out := joined(c.ProcessBytes([]byte("?")))
+	want := "|M:0.000,0.000,0.000|W:1.000,2.000,-3.500|FS:123,456|B:"
+	if !strings.Contains(out, want) {
+		t.Fatalf("status response = %q, want segment %q", out, want)
+	}
+}
+
 func TestStartupBlankNormalize(t *testing.T) {
 	c, _ := testCtl()
 	if got := joined(c.Connect()); got != "\r\nGrbl 1.1g [help:'$']\r\n" {
@@ -224,6 +268,8 @@ func TestWCSWriteRejected(t *testing.T) {
 		{"G10 L2 P1 A1\n", "G10L2P1A1"},
 		{"G10 L2 P1 Zbad\n", "G10L2P1ZBAD"},
 		{"G10 L2 P1 X1 Y2\n", "G10L2P1X1Y2"},
+		{"G10 L2 P1 XNaN\n", "G10L2P1XNAN"},
+		{"G10 L2 P1 X+Inf\n", "G10L2P1X+INF"},
 		{"G10 L20 P1 Z1\n", "G10L20P1Z1"},
 	}
 

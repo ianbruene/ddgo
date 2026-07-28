@@ -77,6 +77,9 @@ type mockGRBLOptions struct {
 	SuppressResponseFor string
 	HoldResponseFor     string
 	ProbeOmitResultFor  string
+	StatusPositionField string
+	StatusWCO           string
+	StatusFS            string
 }
 
 func startMockGRBL(t *testing.T) *mockProcess {
@@ -125,6 +128,15 @@ func startMockGRBLWithOptions(t *testing.T, opts mockGRBLOptions) *mockProcess {
 	}
 	if opts.ProbeOmitResultFor != "" {
 		args = append(args, "-probe-omit-result-for", opts.ProbeOmitResultFor)
+	}
+	if opts.StatusPositionField != "" {
+		args = append(args, "-status-position-field", opts.StatusPositionField)
+	}
+	if opts.StatusWCO != "" {
+		args = append(args, "-status-wco", opts.StatusWCO)
+	}
+	if opts.StatusFS != "" {
+		args = append(args, "-status-fs", opts.StatusFS)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = logFile
@@ -774,6 +786,70 @@ func TestDDGoConnectsToMockAndReadsStatus(t *testing.T) {
 		if !near(got, 0, 0.001) {
 			t.Fatalf("initial machine position[%d] = %v, want near 0; snapshot=%+v", axis, got, snapshot)
 		}
+	}
+}
+
+func TestDDGoParsesMPosStatusAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{StatusPositionField: "MPos"})
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+
+	snapshot := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition &&
+			nearTriple(snapshot.MachinePosition, [3]float64{}, 0.001) && strings.Contains(snapshot.LastStatusRaw, "|MPos:")
+	})
+	if snapshot.HasWorkPosition || snapshot.HasWorkCoordinateOffset {
+		t.Fatalf("MPos status unexpectedly set work fields: %+v", snapshot)
+	}
+}
+
+func TestDDGoParsesWPosStatusAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{StatusPositionField: "WPos"})
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+
+	snapshot := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasWorkPosition &&
+			nearTriple(snapshot.WorkPosition, [3]float64{}, 0.001) && strings.Contains(snapshot.LastStatusRaw, "|WPos:")
+	})
+	if snapshot.HasMachinePosition || snapshot.HasWorkCoordinateOffset {
+		t.Fatalf("WPos status unexpectedly set machine/WCO fields: %+v", snapshot)
+	}
+}
+
+func TestDDGoParsesWPrimaryStatusAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{StatusPositionField: "W"})
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+
+	snapshot := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasWorkPosition &&
+			nearTriple(snapshot.WorkPosition, [3]float64{}, 0.001) && strings.Contains(snapshot.LastStatusRaw, "|W:")
+	})
+	if snapshot.HasMachinePosition || snapshot.HasWorkCoordinateOffset {
+		t.Fatalf("primary W status unexpectedly set machine/WCO fields: %+v", snapshot)
+	}
+}
+
+func TestDDGoParsesWCOAndFSStatusAgainstMock(t *testing.T) {
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{
+		StatusPositionField: "M",
+		StatusWCO:           "1.000,2.000,-3.500",
+		StatusFS:            "123,456",
+	})
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+
+	wantWCO := [3]float64{1, 2, -3.5}
+	snapshot := waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition &&
+			snapshot.HasWorkCoordinateOffset && nearTriple(snapshot.WorkCoordinateOffset, wantWCO, 0.001) &&
+			snapshot.HasFeedSpindle && near(snapshot.Feed, 123, 0.001) && near(snapshot.Spindle, 456, 0.001) &&
+			strings.Contains(snapshot.LastStatusRaw, "|W:1.000,2.000,-3.500|") &&
+			strings.Contains(snapshot.LastStatusRaw, "|FS:123,456|")
+	})
+	if !snapshot.Connected || snapshot.MachineState != "Idle" {
+		t.Fatalf("controller not connected and idle: %+v", snapshot)
 	}
 }
 
@@ -3231,4 +3307,8 @@ func near(got, want, tol float64) bool {
 		return want-got <= tol
 	}
 	return got-want <= tol
+}
+
+func nearTriple(got, want [3]float64, tol float64) bool {
+	return near(got[0], want[0], tol) && near(got[1], want[1], tol) && near(got[2], want[2], tol)
 }

@@ -501,7 +501,26 @@ func (c *Controller) freeRXBytesLocked() int {
 func (c *Controller) statusLine() string {
 	c.reconcile()
 	free := c.freePlannerBlocksLocked()
-	line := fmt.Sprintf("<%s|M:%.3f,%.3f,%.3f|B:%d,%d|L:%d|0000>%s", c.state, c.pos[0], c.pos[1], c.pos[2], free, c.freeRXBytesLocked(), 0, c.fw.LineEnding)
+	positionField := c.fw.StatusPositionField
+	switch positionField {
+	case "M", "MPos", "WPos", "W":
+	default:
+		positionField = "M"
+	}
+	parts := []string{
+		string(c.state),
+		fmt.Sprintf("%s:%.3f,%.3f,%.3f", positionField, c.pos[0], c.pos[1], c.pos[2]),
+	}
+	if c.fw.StatusWCOEnabled {
+		w := c.fw.StatusWCO
+		parts = append(parts, fmt.Sprintf("W:%.3f,%.3f,%.3f", w[0], w[1], w[2]))
+	}
+	if c.fw.StatusFSEnabled {
+		fs := c.fw.StatusFS
+		parts = append(parts, fmt.Sprintf("FS:%.0f,%.0f", fs[0], fs[1]))
+	}
+	parts = append(parts, fmt.Sprintf("B:%d,%d", free, c.freeRXBytesLocked()), "L:0", "0000")
+	line := "<" + strings.Join(parts, "|") + ">" + c.fw.LineEnding
 	c.lastResp = strings.TrimSpace(line)
 	c.logResponseLines(line)
 	return line
