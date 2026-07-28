@@ -3189,9 +3189,9 @@ func requireProgramFailedWithError(t *testing.T, c *app.Controller, text string)
 	})
 }
 
-func requireProgramCompleted(t *testing.T, c *app.Controller, total int) {
+func requireProgramCompleted(t *testing.T, c *app.Controller, total int) app.State {
 	t.Helper()
-	waitForControllerState(t, c, 5*time.Second, func(snapshot app.State) bool {
+	return waitForControllerState(t, c, 5*time.Second, func(snapshot app.State) bool {
 		return snapshot.ProgramStatus == app.ProgramCompleted &&
 			snapshot.ProgramComplete == snapshot.ProgramTotal &&
 			snapshot.ProgramTotal == total &&
@@ -3201,8 +3201,7 @@ func requireProgramCompleted(t *testing.T, c *app.Controller, total int) {
 
 func requireProgramCompletedClean(t *testing.T, c *app.Controller, total int) app.State {
 	t.Helper()
-	requireProgramCompleted(t, c, total)
-	state := c.Snapshot()
+	state := requireProgramCompleted(t, c, total)
 	if state.LastError != "" {
 		t.Fatalf("LastError = %q, want empty after completed program", state.LastError)
 	}
