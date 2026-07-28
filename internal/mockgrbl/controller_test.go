@@ -568,6 +568,103 @@ func TestResetResponsesAreLoggedAsSeparateLines(t *testing.T) {
 	}
 }
 
+func TestManualHoldResumeState(t *testing.T) {
+	c, _ := testCtl()
+	c.ProcessBytes([]byte("!"))
+	if snap := c.Snapshot(); snap.LastCommand != "!" || snap.State != StateHold {
+		t.Fatalf("hold snapshot = %+v", snap)
+	}
+	if out := joined(c.ProcessBytes([]byte("?"))); !strings.Contains(out, "<Hold|") {
+		t.Fatalf("hold status = %q", out)
+	}
+
+	c.ProcessBytes([]byte("~"))
+	if snap := c.Snapshot(); snap.LastCommand != "~" || snap.State != StateIdle {
+		t.Fatalf("resume snapshot = %+v", snap)
+	}
+	if out := joined(c.ProcessBytes([]byte("?"))); !strings.Contains(out, "<Idle|") {
+		t.Fatalf("resume status = %q", out)
+	}
+}
+
+func TestHomeResetsPositionAndReturnsIdle(t *testing.T) {
+	c, clk := testCtl()
+	if out := joined(c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))); out != "ok\r\n" {
+		t.Fatalf("jog response = %q", out)
+	}
+	clk.Advance(time.Second)
+	if got := c.Snapshot().MachinePosition; got == DefaultMachineProfile().InitialPosition {
+		t.Fatalf("position did not change: %v", got)
+	}
+
+	if out := joined(c.ProcessBytes([]byte("$H\n"))); out != "ok\r\n" {
+		t.Fatalf("home response = %q", out)
+	}
+	snap := c.Snapshot()
+	if !hasLog(c.Commands(), "command", "$H") || snap.State != StateIdle ||
+		snap.MachinePosition != DefaultMachineProfile().InitialPosition || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 {
+		t.Fatalf("home snapshot = %+v; commands=%+v", snap, c.Commands())
+	}
+}
+
+func TestSoftResetEmitsResetAlarmStartupAndClearsMotion(t *testing.T) {
+	c, _ := testCtl()
+	for _, command := range []string{"$J=G53 G90 X-10 F60\n", "$J=G53 G90 Y-10 F60\n"} {
+		if out := joined(c.ProcessBytes([]byte(command))); out != "ok\r\n" {
+			t.Fatalf("jog response = %q", out)
+		}
+	}
+	if snap := c.Snapshot(); snap.ActiveMove == nil || snap.QueuedCommandCount != 1 {
+		t.Fatalf("pre-reset snapshot = %+v", snap)
+	}
+
+	assertResetResult(t, c, joined(c.ProcessBytes([]byte{0x18})), "Ctrl-X")
+}
+
+func TestAlternateResetMatchesSoftReset(t *testing.T) {
+	c, _ := testCtl()
+	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
+	if snap := c.Snapshot(); snap.ActiveMove == nil {
+		t.Fatalf("pre-reset snapshot = %+v", snap)
+	}
+
+	assertResetResult(t, c, joined(c.ProcessBytes([]byte("|"))), "|")
+}
+
+func TestUnlockClearsResetAlarm(t *testing.T) {
+	c, _ := testCtl()
+	c.ProcessBytes([]byte{0x18})
+	if got := c.Snapshot().LastErrorAlarm; got != "ALARM:3" {
+		t.Fatalf("reset alarm = %q", got)
+	}
+	if out := joined(c.ProcessBytes([]byte("$X\n"))); out != "ok\r\n" {
+		t.Fatalf("unlock response = %q", out)
+	}
+	snap := c.Snapshot()
+	if snap.State != StateIdle || snap.LastErrorAlarm != "" || !hasLog(c.Commands(), "command", "$X") {
+		t.Fatalf("unlock snapshot = %+v; commands=%+v", snap, c.Commands())
+	}
+}
+
+func assertResetResult(t *testing.T, c *Controller, out, command string) {
+	t.Helper()
+	want := []string{"[MSG:reset]", "ALARM:3", "Grbl 1.1g [help:'$']"}
+	last := -1
+	for _, text := range want {
+		at := strings.Index(out, text)
+		if at <= last {
+			t.Fatalf("reset response order = %q", out)
+		}
+		last = at
+	}
+	snap := c.Snapshot()
+	if snap.State != StateIdle || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 ||
+		snap.FreePlannerBlocks != snap.QueueCapacity || snap.LastErrorAlarm != "ALARM:3" ||
+		!hasLog(c.Commands(), "command", command) || !hasLog(c.Events(), "realtime", command) {
+		t.Fatalf("reset snapshot = %+v; commands=%+v; events=%+v", snap, c.Commands(), c.Events())
+	}
+}
+
 func hasLog(entries []LogEntry, kind, text string) bool {
 	for _, e := range entries {
 		if e.Kind == kind && e.Text == text {
