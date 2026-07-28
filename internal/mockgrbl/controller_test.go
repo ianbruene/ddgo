@@ -378,6 +378,66 @@ func TestMalformedAndHardLimit(t *testing.T) {
 	}
 }
 
+func TestHardLimitMaterializesPositionAndEntersAlarm(t *testing.T) {
+	c, clk := testCtl()
+	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
+	clk.Advance(5 * time.Second)
+
+	out := joined(c.HardLimit("X"))
+	if out != "[MSG:Limit X]\r\nALARM:1\r\n" {
+		t.Fatalf("hard-limit response = %q", out)
+	}
+	snap := c.Snapshot()
+	if snap.State != StateAlarm || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 || snap.LastErrorAlarm != "ALARM:1" {
+		t.Fatalf("hard-limit snapshot = %+v", snap)
+	}
+	if x := snap.MachinePosition[0]; x >= 0 || x <= -10 {
+		t.Fatalf("materialized X = %v, want strictly between -10 and 0", x)
+	}
+	if !hasLog(c.Events(), "limit", "X") {
+		t.Fatalf("limit event not logged: %+v", c.Events())
+	}
+}
+
+func TestHardLimitClearsQueuedMotion(t *testing.T) {
+	c, _ := testCtl()
+	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
+	c.ProcessBytes([]byte("$J=G53 G90 Y-10 F60\n"))
+	if snap := c.Snapshot(); snap.ActiveMove == nil || snap.QueuedCommandCount != 1 {
+		t.Fatalf("pre-limit snapshot = %+v", snap)
+	}
+
+	out := joined(c.HardLimit("Y"))
+	snap := c.Snapshot()
+	if snap.State != StateAlarm || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 || snap.FreePlannerBlocks != snap.QueueCapacity {
+		t.Fatalf("hard-limit snapshot = %+v", snap)
+	}
+	if !strings.Contains(out, "[MSG:Limit Y]") || !strings.Contains(out, "ALARM:1") {
+		t.Fatalf("hard-limit response = %q", out)
+	}
+}
+
+func TestAlarmRejectsJogUntilUnlock(t *testing.T) {
+	c, _ := testCtl()
+	c.HardLimit("X")
+	command := []byte("$J=G53 G90 X-1 F60\n")
+	if out := joined(c.ProcessBytes(command)); !strings.Contains(out, "[MSG:Busy]\r\nerror:9") {
+		t.Fatalf("alarmed jog response = %q", out)
+	}
+	if out := joined(c.ProcessBytes([]byte("$X\n"))); out != "ok\r\n" {
+		t.Fatalf("unlock response = %q", out)
+	}
+	if snap := c.Snapshot(); snap.State != StateIdle || snap.LastErrorAlarm != "" {
+		t.Fatalf("unlocked snapshot = %+v", snap)
+	}
+	if out := joined(c.ProcessBytes(command)); out != "ok\r\n" {
+		t.Fatalf("post-unlock jog response = %q", out)
+	}
+	if snap := c.Snapshot(); snap.State != StateJog {
+		t.Fatalf("post-unlock state = %q, want Jog", snap.State)
+	}
+}
+
 func TestReconcileConsumesElapsedAcrossQueuedMoves(t *testing.T) {
 	c, clk := testCtl()
 	c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))
