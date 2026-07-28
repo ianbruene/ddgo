@@ -42,6 +42,9 @@ type mockState struct {
 	MachinePosition    [3]float64  `json:"machine_position"`
 	ActiveMove         interface{} `json:"active_move"`
 	QueuedCommandCount int         `json:"queued_command_count"`
+	FreePlannerBlocks  int         `json:"free_planner_blocks"`
+	QueueCapacity      int         `json:"queue_capacity"`
+	LastErrorAlarm     string      `json:"last_error_alarm"`
 }
 
 type mockLogEntry struct {
@@ -695,6 +698,74 @@ func TestMockGRBLDebugResetEndpoint(t *testing.T) {
 	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /reset status = %s, want 405", getResp.Status)
+	}
+}
+
+func postMockHardLimit(t *testing.T, m *mockProcess, axis string) []string {
+	t.Helper()
+	path := m.HTTPBase + "/hard-limit"
+	if axis != "" {
+		path += "?axis=" + axis
+	}
+	req, err := http.NewRequest(http.MethodPost, path, nil)
+	if err != nil {
+		t.Fatalf("create hard-limit request: %v", err)
+	}
+	resp, err := m.client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /hard-limit: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /hard-limit status = %s", resp.Status)
+	}
+	var lines []string
+	if err := json.NewDecoder(resp.Body).Decode(&lines); err != nil {
+		t.Fatalf("decode POST /hard-limit response: %v", err)
+	}
+	return lines
+}
+
+func TestMockGRBLDebugHardLimitEndpoint(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.JogTo(ctx, "X", -10, 60); err != nil {
+		t.Fatalf("start jog: %v", err)
+	}
+	wip := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil && state.MachinePosition[0] < -0.01 && state.MachinePosition[0] > -9.99
+	})
+	text := strings.Join(postMockHardLimit(t, m, "X"), "")
+	if !strings.Contains(text, "[MSG:Limit X]") || !strings.Contains(text, "ALARM:1") {
+		t.Fatalf("hard-limit response = %q", text)
+	}
+	state := m.state(t)
+	if state.State != "Alarm" || state.ActiveMove != nil || state.QueuedCommandCount != 0 ||
+		state.FreePlannerBlocks != state.QueueCapacity || state.LastErrorAlarm != "ALARM:1" ||
+		state.MachinePosition[0] >= 0 || state.MachinePosition[0] <= -10 || state.MachinePosition[0] > wip.MachinePosition[0] {
+		t.Fatalf("hard-limit state = %+v; in-progress state=%+v", state, wip)
+	}
+
+	getResp, err := m.client.Get(m.HTTPBase + "/hard-limit?axis=X")
+	if err != nil {
+		t.Fatalf("GET /hard-limit: %v", err)
+	}
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /hard-limit status = %s", getResp.Status)
+	}
+	for _, path := range []string{"/hard-limit?axis=A", "/hard-limit"} {
+		req, _ := http.NewRequest(http.MethodPost, m.HTTPBase+path, nil)
+		resp, err := m.client.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("POST %s status = %s, want 400", path, resp.Status)
+		}
 	}
 }
 
@@ -3093,6 +3164,92 @@ func TestDDGoSoftResetReportsAlarmAndStartupAgainstMock(t *testing.T) {
 	})
 	if final.LastError != "" {
 		t.Fatalf("post-reset LastError = %q, want empty; state=%+v", final.LastError, final)
+	}
+}
+
+func TestDDGoSeesHardLimitAlarmAndUnlocksAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, m)
+	controller := h.Controller
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState == "Idle" && state.HasMachinePosition
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := controller.JogTo(ctx, "X", -10, 60); err != nil {
+		t.Fatalf("start pre-limit jog: %v", err)
+	}
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil && state.MachinePosition[0] < -0.01 && state.MachinePosition[0] > -9.99
+	})
+	responsesAfter := mockResponseCount(t, m)
+	controllerEventsAfter := h.eventCount()
+	postMockHardLimit(t, m, "X")
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[MSG:Limit X]") && hasMockResponse(responses, "ALARM:1")
+	})
+
+	// The status byte carries the debug-triggered unsolicited lines through the
+	// real PTY before the alarm status report.
+	requestStatus(t, controller)
+	controllerEvents := h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventConsoleRX, "[MSG:Limit X]") &&
+			hasControllerEventKindText(events, app.EventConsoleRX, "ALARM:1")
+	})
+	assertNoControllerEventKind(t, controllerEvents, app.EventError)
+	alarmed := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState == "Alarm" && state.HasMachinePosition &&
+			state.MachinePosition[0] < 0 && state.MachinePosition[0] > -10
+	})
+	if alarmed.LastError != "" {
+		t.Fatalf("manual hard limit poisoned LastError: %+v", alarmed)
+	}
+
+	eventsAfter := mockEventCount(t, m)
+	responsesAfter = mockResponseCount(t, m)
+	if err := controller.JogTo(ctx, "X", -1, 60); err != nil {
+		t.Fatalf("write alarmed jog: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$J=G53G90X-1.000F60")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[MSG:Busy]") && hasMockResponse(responses, "error:9")
+	})
+
+	eventsAfter, responsesAfter = mockEventCount(t, m), mockResponseCount(t, m)
+	if err := controller.Action(ctx, grbl.ActionUnlock); err != nil {
+		t.Fatalf("unlock after hard limit: %v", err)
+	}
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$X")
+	})
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState == "Idle"
+	})
+
+	responsesAfter = mockResponseCount(t, m)
+	if err := controller.JogTo(ctx, "X", -1, 60); err != nil {
+		t.Fatalf("post-unlock jog: %v", err)
+	}
+	waitForNewMockResponses(t, m, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "ok")
+	})
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Jog" || (state.State == "Idle" && near(state.MachinePosition[0], -1, posTol))
+	})
+	requestStatus(t, controller)
+	final := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.MachineState != "Alarm"
+	})
+	if final.LastError != "" {
+		t.Fatalf("post-recovery LastError = %q", final.LastError)
 	}
 }
 

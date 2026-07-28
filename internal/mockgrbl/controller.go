@@ -24,6 +24,7 @@ type Controller struct {
 	active                     *Move
 	queue                      []queuedMove
 	rx                         []byte
+	pendingSerial              []string
 	logs                       []LogEntry
 	commands                   []LogEntry
 	responses                  []LogEntry
@@ -117,7 +118,8 @@ func (c *Controller) logRealtimeCommand(name string) {
 func (c *Controller) ProcessBytes(bs []byte) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var out []string
+	out := append([]string(nil), c.pendingSerial...)
+	c.pendingSerial = nil
 	for _, b := range bs {
 		c.reconcile()
 		switch b {
@@ -173,6 +175,14 @@ func (c *Controller) ProcessBytes(bs []byte) []string {
 		}
 	}
 	return out
+}
+
+// queueSerial schedules debug-triggered firmware output for the serial peer.
+// It is drained by the next byte received through the PTY.
+func (c *Controller) queueSerial(responses []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingSerial = append(c.pendingSerial, responses...)
 }
 func (c *Controller) handleLine(raw string) []string {
 	norm := NormalizeLine(raw)
@@ -617,9 +627,11 @@ func (c *Controller) Reset() []string { c.mu.Lock(); defer c.mu.Unlock(); return
 func (c *Controller) HardLimit(axis string) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.reconcile()
 	c.active = nil
 	c.queue = nil
 	c.setState(StateAlarm)
 	c.lastErr = "ALARM:1"
+	c.log("limit", axis)
 	return c.emit(c.fw.Msg("Limit "+axis) + c.fw.Alarm(1))
 }
