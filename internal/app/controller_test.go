@@ -18,6 +18,8 @@ import (
 	"github.com/ianbruene/ddgo/internal/transport"
 )
 
+const noExtraLifecycleEventWindow = 100 * time.Millisecond
+
 func TestControllerRefreshPorts(t *testing.T) {
 	t.Parallel()
 
@@ -87,7 +89,7 @@ func TestControllerExplicitDisconnectDoesNotEmitTransportDisconnected(t *testing
 		t.Fatalf("Disconnect() error = %v", err)
 	}
 	events := collectEventsThroughText(t, controller.Events(), "disconnected")
-	events = append(events, collectEventsFor(controller.Events(), 100*time.Millisecond)...)
+	events = append(events, collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)...)
 	assertEventTextCount(t, events, "disconnected", 1)
 	assertEventTextCount(t, events, "transport disconnected", 0)
 
@@ -110,7 +112,7 @@ func TestControllerUnexpectedDisconnectStillEmitsTransportDisconnected(t *testin
 
 	fake.InjectDisconnected()
 	events := collectEventsThroughText(t, controller.Events(), "transport disconnected")
-	events = append(events, collectEventsFor(controller.Events(), 100*time.Millisecond)...)
+	events = append(events, collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)...)
 	assertEventTextCount(t, events, "transport disconnected", 1)
 	assertEventTextCount(t, events, "disconnected", 0)
 	if state := controller.Snapshot(); state.Connected || state.LastError != "" {
@@ -133,7 +135,7 @@ func TestControllerExplicitDisconnectIsIdempotentAfterSuppressingTransportEvent(
 	if err := controller.Disconnect(); err != nil {
 		t.Fatalf("second Disconnect() error = %v", err)
 	}
-	events := collectEventsFor(controller.Events(), 100*time.Millisecond)
+	events := collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)
 	assertEventTextCount(t, events, "transport disconnected", 0)
 	if state := controller.Snapshot(); state.Connected || state.LastError != "" {
 		t.Fatalf("state after repeated explicit disconnect = %+v", state)
@@ -169,7 +171,7 @@ func TestControllerCloseErrorDoesNotLeaveDisconnectSuppressionStale(t *testing.T
 
 	fake.InjectDisconnected()
 	events := collectEventsThroughText(t, controller.Events(), "transport disconnected")
-	events = append(events, collectEventsFor(controller.Events(), 100*time.Millisecond)...)
+	events = append(events, collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)...)
 	assertEventTextCount(t, events, "transport disconnected", 1)
 	assertEventTextCount(t, events, "disconnected", 0)
 

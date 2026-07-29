@@ -69,16 +69,16 @@ func main() {
 				responses := ctl.ProcessBytes([]byte{b})
 				events := ctl.Events()
 				newEvents := events[eventsBefore:]
-				if shouldSuppressResponses(newEvents, *probeOmitResultFor) {
+				if hasCommandEvent(newEvents, *probeOmitResultFor) {
 					ctl.DiscardResponseLogs(responses)
 					writeResponses(ptm, []string{"ok\r\n"}, *responseDelay)
 					continue
 				}
-				if shouldSuppressResponses(newEvents, *suppressResponseFor) {
+				if hasCommandEvent(newEvents, *suppressResponseFor) {
 					ctl.DiscardResponseLogs(responses)
 					continue
 				}
-				if shouldHoldResponses(newEvents, *holdResponseFor) {
+				if hasCommandEvent(newEvents, *holdResponseFor) {
 					log.Printf("holding serial responses for %q until process exit", *holdResponseFor)
 					select {}
 				}
@@ -142,19 +142,7 @@ func writeResponses(w io.Writer, responses []string, delay time.Duration) {
 	}
 }
 
-func shouldSuppressResponses(events []mockgrbl.LogEntry, command string) bool {
-	if command == "" {
-		return false
-	}
-	for _, event := range events {
-		if event.Kind == "command" && event.Text == command {
-			return true
-		}
-	}
-	return false
-}
-
-func shouldHoldResponses(events []mockgrbl.LogEntry, command string) bool {
+func hasCommandEvent(events []mockgrbl.LogEntry, command string) bool {
 	if command == "" {
 		return false
 	}
