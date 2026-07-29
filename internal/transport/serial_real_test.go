@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const noUnexpectedTransportEventWindow = 100 * time.Millisecond
+
 type scriptedRead struct {
 	data []byte
 	err  error
@@ -153,7 +155,7 @@ func TestSerialTransportReadLoopEOFEmitsDisconnectedAndClearsPort(t *testing.T) 
 	if err := tr.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	assertNoTransportEvent(t, tr.events, 100*time.Millisecond)
+	assertNoTransportEvent(t, tr.events, noUnexpectedTransportEventWindow)
 }
 
 func TestSerialTransportReadLoopErrorEmitsErrorThenDisconnectedAndClearsPort(t *testing.T) {
@@ -191,7 +193,7 @@ func TestSerialTransportExplicitCloseDoesNotEmitUnexpectedError(t *testing.T) {
 	if event.Kind != EventDisconnected {
 		t.Fatalf("event kind = %q, want %q", event.Kind, EventDisconnected)
 	}
-	assertNoTransportEvent(t, tr.events, 100*time.Millisecond)
+	assertNoTransportEvent(t, tr.events, noUnexpectedTransportEventWindow)
 	assertSerialTransportClosed(t, tr)
 }
 
