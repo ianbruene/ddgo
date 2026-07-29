@@ -1844,7 +1844,7 @@ func TestDDGoProgramFailsWhenTransportDropsDuringAckWaitAgainstMock(t *testing.T
 	requireControllerErrorEventAny(t, h, controllerEventsAfter, transportDropErrorTexts()...)
 }
 
-func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
+func TestDDGoReconnectsAfterActiveProgramMockProcessExit(t *testing.T) {
 	first := startMockGRBLHoldingResponseFor(t, "$G")
 	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate
 	// the otherwise-valid response but blocks the serial write until the process is
@@ -1858,6 +1858,7 @@ func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
 	}
 
 	eventsAfter := mockEventCount(t, first)
+	controllerEventsAfter := h.eventCount()
 	runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer runCancel()
 	if err := controller.StartProgram(runCtx); err != nil {
@@ -1866,14 +1867,32 @@ func TestDDGoReconnectsAfterProgramTransportDropAgainstMock(t *testing.T) {
 	waitForNewMockEvents(t, first, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$G")
 	})
+	// Killing the mock while it is holding the $G response should surface as an
+	// unexpected transport disconnect. Do not call Controller.Disconnect() here;
+	// this test verifies the bridge clears controller connection state itself.
 	first.stopNow(t)
-	requireProgramFailedWithAnyError(t, controller, transportDropErrorTexts()...)
-
-	if controller.Snapshot().Connected {
-		if err := controller.Disconnect(); err != nil {
-			t.Fatalf("disconnect after transport drop: %v", err)
-		}
+	failed := requireProgramFailedWithAnyError(t, controller, transportDropErrorTexts()...)
+	if failed.ProgramComplete != 0 {
+		t.Fatalf("ProgramComplete = %d, want 0 after transport loss", failed.ProgramComplete)
 	}
+	if !containsAny(failed.LastError, transportDropErrorTexts()...) {
+		t.Fatalf("LastError = %q, want transport-drop text", failed.LastError)
+	}
+	requireControllerErrorEventAny(t, h, controllerEventsAfter, transportDropErrorTexts()...)
+
+	disconnected := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return !state.Connected &&
+			state.MachineState == "" &&
+			!state.HasMachinePosition &&
+			state.LastStatusRaw == "" &&
+			state.ProgramStatus == app.ProgramFailed
+	})
+	if !containsAny(disconnected.LastError, transportDropErrorTexts()...) {
+		t.Fatalf("LastError after process exit = %q, want transport-drop text", disconnected.LastError)
+	}
+	h.waitForEventsAfter(t, controllerEventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventStateChanged, "transport disconnected")
+	})
 
 	second := startMockGRBL(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
