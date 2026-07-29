@@ -20,6 +20,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 - WCS offset read/write helper support using `$#` and `G10 L2`.
 - Process-local variable store and contour state primitives.
 - Contour mode lifecycle reset on program start and program failure.
+- Local mock GrblDD controller for serial-style integration tests and controller development.
 
 ## What is not implemented yet
 
@@ -37,8 +38,10 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 - `internal/ports`: serial port discovery seam and real/stub implementations.
 - `internal/ui`: optional MIQT/Qt Widgets UI and no-tag stub.
 - `cmd/ddgo`: application entrypoint.
+- `cmd/mockgrbl`: local GrblDD-style mock controller with PTY serial emulation and debug HTTP API.
 - `docs/architecture.md`: current architecture notes for contributors.
 - `docs/macros.md`: macro framework status, runtime capabilities, limitations, and planned order.
+- `docs/mockgrbl.md`: mock controller usage, debug API, test hooks, and integration-test notes.
 
 ## Build tags
 
@@ -62,6 +65,14 @@ If you want to include the serial-tagged transport and port-listing tests on a m
 ```bash
 go test -tags serial ./internal/transport ./internal/ports ./internal/app ./internal/grbl
 ```
+
+Linux mockgrbl integration tests use PTYs and require both `serial` and `mockgrbl_e2e` tags:
+
+```bash
+go test -tags 'serial mockgrbl_e2e' ./internal/integration/mockgrbl
+```
+
+For mock controller usage and debug endpoints, see [`docs/mockgrbl.md`](docs/mockgrbl.md).
 
 ## Build/run
 

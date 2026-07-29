@@ -79,3 +79,7 @@ Currently deferred macro behavior:
 `macro.ContourState` stores contour points and an enabled/disabled lifecycle flag. It rejects duplicate X/Y points, and enabling contour mode requires at least three points so a future surface can be defined. Clearing contour state removes all collected points and disables contour mode.
 
 Program start disables contour mode without clearing collected points. Program failure also disables contour mode without clearing points. Actual contour surface fitting, motion rewriting, and Z compensation are deferred.
+
+## Mock controller
+
+`cmd/mockgrbl` and `internal/mockgrbl` provide a GrblDD-style mock controller for Linux PTY-based integration tests. The mock is intentionally scoped to DDGo development needs: command acceptance, status reports, motion-state simulation, selected `$` queries, probe/WCS helpers, reset/hard-limit behavior, and transport-loss test hooks. Usage details live in [`docs/mockgrbl.md`](mockgrbl.md).
