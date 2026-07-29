@@ -70,6 +70,76 @@ func TestControllerHandlesTransportDisconnectedWhileIdle(t *testing.T) {
 	waitForEventText(t, controller.Events(), EventStateChanged, "transport disconnected")
 }
 
+func TestControllerExplicitDisconnectDoesNotEmitTransportDisconnected(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	fake.InjectRX("<Idle|M:1.000,2.000,3.000|B:15,128|L:0|0000>")
+	waitForState(t, controller, func(s State) bool {
+		return s.Connected && s.MachineState == "Idle" && s.HasMachinePosition
+	})
+	drainEvents(controller.Events())
+
+	if err := controller.Disconnect(); err != nil {
+		t.Fatalf("Disconnect() error = %v", err)
+	}
+	events := collectEventsThroughText(t, controller.Events(), "disconnected")
+	events = append(events, collectEventsFor(controller.Events(), 100*time.Millisecond)...)
+	assertEventTextCount(t, events, "disconnected", 1)
+	assertEventTextCount(t, events, "transport disconnected", 0)
+
+	state := controller.Snapshot()
+	if state.Connected || state.MachineState != "" || state.HasMachinePosition || state.LastStatusRaw != "" || state.LastError != "" {
+		t.Fatalf("state after explicit disconnect = %+v", state)
+	}
+}
+
+func TestControllerUnexpectedDisconnectStillEmitsTransportDisconnected(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	fake.InjectRX("<Idle|M:1.000,2.000,3.000|B:15,128|L:0|0000>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Idle" })
+	drainEvents(controller.Events())
+
+	fake.InjectDisconnected()
+	events := collectEventsThroughText(t, controller.Events(), "transport disconnected")
+	events = append(events, collectEventsFor(controller.Events(), 100*time.Millisecond)...)
+	assertEventTextCount(t, events, "transport disconnected", 1)
+	assertEventTextCount(t, events, "disconnected", 0)
+	if state := controller.Snapshot(); state.Connected || state.LastError != "" {
+		t.Fatalf("state after unexpected disconnect = %+v", state)
+	}
+}
+
+func TestControllerExplicitDisconnectIsIdempotentAfterSuppressingTransportEvent(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	if err := controller.Disconnect(); err != nil {
+		t.Fatalf("first Disconnect() error = %v", err)
+	}
+	if err := controller.Disconnect(); err != nil {
+		t.Fatalf("second Disconnect() error = %v", err)
+	}
+	events := collectEventsFor(controller.Events(), 100*time.Millisecond)
+	assertEventTextCount(t, events, "transport disconnected", 0)
+	if state := controller.Snapshot(); state.Connected || state.LastError != "" {
+		t.Fatalf("state after repeated explicit disconnect = %+v", state)
+	}
+}
+
 func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T) {
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, nil)
@@ -1064,6 +1134,60 @@ func waitForEventText(t *testing.T, ch <-chan Event, kind EventKind, text string
 		case <-deadline:
 			t.Fatalf("timed out waiting for event kind %q with text %q", kind, text)
 		}
+	}
+}
+
+func drainEvents(ch <-chan Event) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+func collectEventsThroughText(t *testing.T, ch <-chan Event, text string) []Event {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	var events []Event
+	for {
+		select {
+		case event := <-ch:
+			events = append(events, event)
+			if event.Text == text {
+				return events
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for event text %q; events=%+v", text, events)
+		}
+	}
+}
+
+func collectEventsFor(ch <-chan Event, duration time.Duration) []Event {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	var events []Event
+	for {
+		select {
+		case event := <-ch:
+			events = append(events, event)
+		case <-timer.C:
+			return events
+		}
+	}
+}
+
+func assertEventTextCount(t *testing.T, events []Event, text string, want int) {
+	t.Helper()
+	got := 0
+	for _, event := range events {
+		if event.Text == text {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("event text %q count = %d, want %d; events=%+v", text, got, want, events)
 	}
 }
 
