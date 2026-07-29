@@ -28,23 +28,24 @@ type programRun struct {
 }
 
 type Controller struct {
-	mu                        sync.RWMutex
-	transport                 transport.Transport
-	listPorts                 ports.ListFunc
-	events                    chan Event
-	state                     State
-	loaded                    gcode.Program
-	run                       *programRun
-	statusPollCancel          context.CancelFunc
-	statusPollDone            chan struct{}
-	statusPollInterval        time.Duration
-	macroEngine               *macro.Engine
-	motionRewriter            macro.MotionRewriter
-	variables                 *macro.VariableStore
-	contour                   *macro.ContourState
-	lastProbe                 macro.Point
-	hasLastProbe              bool
-	pendingQuietStatusReports int
+	mu                                sync.RWMutex
+	transport                         transport.Transport
+	listPorts                         ports.ListFunc
+	events                            chan Event
+	state                             State
+	loaded                            gcode.Program
+	run                               *programRun
+	statusPollCancel                  context.CancelFunc
+	statusPollDone                    chan struct{}
+	statusPollInterval                time.Duration
+	macroEngine                       *macro.Engine
+	motionRewriter                    macro.MotionRewriter
+	variables                         *macro.VariableStore
+	contour                           *macro.ContourState
+	lastProbe                         macro.Point
+	hasLastProbe                      bool
+	pendingQuietStatusReports         int
+	suppressNextTransportDisconnected bool
 }
 
 func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller {
@@ -132,20 +133,19 @@ func (c *Controller) Disconnect() error {
 		return ErrProgramActive
 	}
 	c.stopStatusPolling()
+	c.mu.Lock()
+	c.suppressNextTransportDisconnected = c.state.Connected
+	c.mu.Unlock()
 	if err := c.transport.Close(); err != nil {
+		c.mu.Lock()
+		c.suppressNextTransportDisconnected = false
+		c.mu.Unlock()
 		c.emitError(err)
 		return err
 	}
 
 	c.mu.Lock()
-	c.state.Connected = false
-	c.state.MachineState = ""
-	c.state.HasMachinePosition = false
-	c.state.HasWorkPosition = false
-	c.state.WorkCoordinateOffset = [3]float64{}
-	c.state.HasWorkCoordinateOffset = false
-	c.state.HasFeedSpindle = false
-	c.state.LastStatusRaw = ""
+	c.clearConnectionStateLocked()
 	state := c.state
 	c.mu.Unlock()
 
@@ -678,6 +678,22 @@ func (c *Controller) handleTransportDisconnected() {
 	} else {
 		c.state.LastError = ""
 	}
+	changed := c.clearConnectionStateLocked()
+	state := c.state
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if changed || run != nil {
+		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: err.Error()}
+	}
+	if run != nil {
+		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
+	}
+}
+
+func (c *Controller) clearConnectionStateLocked() bool {
 	changed := c.state.Connected ||
 		c.state.MachineState != "" ||
 		c.state.HasMachinePosition ||
@@ -693,18 +709,7 @@ func (c *Controller) handleTransportDisconnected() {
 	c.state.HasWorkCoordinateOffset = false
 	c.state.HasFeedSpindle = false
 	c.state.LastStatusRaw = ""
-	state := c.state
-	c.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	if changed || run != nil {
-		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: err.Error()}
-	}
-	if run != nil {
-		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
-	}
+	return changed
 }
 
 func (c *Controller) ReadWCSOffsets(ctx context.Context) (macro.WCSOffsets, error) {
@@ -806,6 +811,9 @@ func (c *Controller) runTransportEventBridge() {
 		case transport.EventConnected:
 			continue
 		case transport.EventDisconnected:
+			if c.consumeExpectedTransportDisconnected() {
+				continue
+			}
 			c.handleTransportDisconnected()
 		case transport.EventTX:
 			if !ev.SuppressLog {
@@ -852,6 +860,16 @@ func (c *Controller) runTransportEventBridge() {
 			c.emitError(ev.Err)
 		}
 	}
+}
+
+func (c *Controller) consumeExpectedTransportDisconnected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.suppressNextTransportDisconnected {
+		return false
+	}
+	c.suppressNextTransportDisconnected = false
+	return true
 }
 
 func (c *Controller) deliverProgramResponseLocked(line string) *programRun {

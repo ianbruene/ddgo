@@ -1947,6 +1947,51 @@ func TestDDGoReconnectsAfterIdleMockProcessExit(t *testing.T) {
 	}
 }
 
+func TestDDGoExplicitDisconnectDoesNotReportTransportDisconnectedAgainstMock(t *testing.T) {
+	first := startMockGRBL(t)
+	h := connectControllerToMockWithEvents(t, first)
+	controller := h.Controller
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	eventsAfter := h.eventCount()
+
+	if err := controller.Disconnect(); err != nil {
+		t.Fatalf("explicit disconnect: %v", err)
+	}
+	disconnected := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return !state.Connected && state.MachineState == "" &&
+			!state.HasMachinePosition && state.LastStatusRaw == ""
+	})
+	if disconnected.LastError != "" {
+		t.Fatalf("LastError after explicit disconnect = %q, want empty", disconnected.LastError)
+	}
+	events := h.waitForEventsAfter(t, eventsAfter, 5*time.Second, func(events []app.Event) bool {
+		return hasControllerEventKindText(events, app.EventStateChanged, "disconnected")
+	})
+	// Give the serial event bridge time to expose any duplicate transport-loss
+	// event before inspecting the complete post-disconnect event slice.
+	time.Sleep(100 * time.Millisecond)
+	events = h.eventsAfter(eventsAfter)
+	assertControllerEventTextCount(t, events, "disconnected", 1)
+	assertControllerEventTextCount(t, events, "transport disconnected", 0)
+
+	second := startMockGRBL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := controller.Connect(ctx, transport.DefaultPortConfig(second.SerialPath)); err != nil {
+		t.Fatalf("reconnect after explicit disconnect: %v", err)
+	}
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+	responsesAfter := mockResponseCount(t, second)
+	if err := controller.SendConsoleLine(ctx, "$I"); err != nil {
+		t.Fatalf("send $I after explicit disconnect reconnect: %v", err)
+	}
+	waitForNewMockResponses(t, second, responsesAfter, 5*time.Second, func(responses []mockLogEntry) bool {
+		return hasMockResponse(responses, "[grbl:") && hasMockResponse(responses, "ok")
+	})
+}
+
 func TestDDGoReconnectsAfterManualJogMockProcessExit(t *testing.T) {
 	first := startMockGRBL(t)
 	controller := connectControllerToMock(t, first)
@@ -3892,6 +3937,19 @@ func hasControllerEventKindText(events []app.Event, kind app.EventKind, text str
 		}
 	}
 	return false
+}
+
+func assertControllerEventTextCount(t *testing.T, events []app.Event, text string, want int) {
+	t.Helper()
+	got := 0
+	for _, event := range events {
+		if event.Text == text {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("controller event text %q count = %d, want %d; events=%+v", text, got, want, events)
+	}
 }
 
 func assertNoControllerEventKind(t *testing.T, events []app.Event, kind app.EventKind) {
