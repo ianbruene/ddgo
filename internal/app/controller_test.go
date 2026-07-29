@@ -140,6 +140,46 @@ func TestControllerExplicitDisconnectIsIdempotentAfterSuppressingTransportEvent(
 	}
 }
 
+func TestControllerCloseErrorDoesNotLeaveDisconnectSuppressionStale(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	fake.InjectRX("<Idle|M:1.000,2.000,3.000|B:15,128|L:0|0000>")
+	waitForState(t, controller, func(s State) bool {
+		return s.Connected && s.MachineState == "Idle" && s.HasMachinePosition
+	})
+	drainEvents(controller.Events())
+
+	closeErr := errors.New("close failed")
+	fake.SetCloseError(closeErr)
+	err := controller.Disconnect()
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("Disconnect() error = %v, want %v", err, closeErr)
+	}
+	requireControllerErrorEventContaining(t, controller.Events(), "close failed")
+
+	state := controller.Snapshot()
+	if !state.Connected || state.MachineState != "Idle" || !state.HasMachinePosition {
+		t.Fatalf("state after failed disconnect = %+v, want still connected with prior status", state)
+	}
+	drainEvents(controller.Events())
+
+	fake.InjectDisconnected()
+	events := collectEventsThroughText(t, controller.Events(), "transport disconnected")
+	events = append(events, collectEventsFor(controller.Events(), 100*time.Millisecond)...)
+	assertEventTextCount(t, events, "transport disconnected", 1)
+	assertEventTextCount(t, events, "disconnected", 0)
+
+	final := controller.Snapshot()
+	if final.Connected || final.MachineState != "" || final.HasMachinePosition ||
+		final.LastStatusRaw != "" || final.LastError != "" {
+		t.Fatalf("state after injected disconnect = %+v", final)
+	}
+}
+
 func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T) {
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, nil)
