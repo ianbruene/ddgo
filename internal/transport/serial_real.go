@@ -16,9 +16,15 @@ import (
 
 const serialArduinoBaudRate = 115200
 
+type serialPort interface {
+	io.Reader
+	io.Writer
+	io.Closer
+}
+
 type SerialTransport struct {
 	mu      sync.Mutex
-	port    serial.Port
+	port    serialPort
 	cfg     PortConfig
 	events  chan Event
 	closed  chan struct{}
@@ -104,7 +110,7 @@ func (t *SerialTransport) Write(ctx context.Context, msg Message) error {
 	return nil
 }
 
-func (t *SerialTransport) readLoop(closed <-chan struct{}, port serial.Port) {
+func (t *SerialTransport) readLoop(closed <-chan struct{}, port serialPort) {
 	defer t.wg.Done()
 	buf := make([]byte, 256)
 	for {
@@ -134,7 +140,7 @@ func (t *SerialTransport) readLoop(closed <-chan struct{}, port serial.Port) {
 	}
 }
 
-func (t *SerialTransport) markUnexpectedDisconnected(port serial.Port, err error) {
+func (t *SerialTransport) markUnexpectedDisconnected(port serialPort, err error) {
 	t.mu.Lock()
 	if t.port != port {
 		t.mu.Unlock()
