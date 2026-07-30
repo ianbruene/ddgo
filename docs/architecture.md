@@ -18,6 +18,8 @@ This document summarizes the current code structure for contributors. It describ
 
 The controller coordinates these concerns but keeps lower-level details in focused packages: transport I/O is in `internal/transport`, GRBL command and status helpers are in `internal/grbl`, G-code loading/parsing is in `internal/gcode`, and macro framework types live in `internal/macro`.
 
+The controller owns status-poll cancellation and waits for the polling goroutine to stop during either explicit or unexpected disconnect cleanup. The serial transport owns its read loop and line buffer; partial serial lines are scoped to one connection and are discarded before a replacement read loop starts.
+
 ## Program execution
 
 Current program execution flow:
