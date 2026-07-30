@@ -112,6 +112,10 @@ func (t *SerialTransport) Write(ctx context.Context, msg Message) error {
 
 func (t *SerialTransport) readLoop(closed <-chan struct{}, port serialPort) {
 	defer t.wg.Done()
+	// A partial line belongs to the connection that read it. In particular, do
+	// not join bytes left by a disconnected device to the first response after
+	// that device (or another one) is opened again.
+	t.readBuf.Reset()
 	buf := make([]byte, 256)
 	for {
 		select {

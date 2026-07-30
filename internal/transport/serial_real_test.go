@@ -216,3 +216,27 @@ func TestSerialTransportConsumesCompleteLines(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 }
+
+func TestSerialTransportReadLoopDiscardsPartialLineFromPriorConnection(t *testing.T) {
+	port := newScriptedSerialPort()
+	tr := &SerialTransport{events: make(chan Event, 16)}
+	tr.consume([]byte("stale partial response"))
+
+	tr.port = port
+	tr.closed = make(chan struct{})
+	tr.wg.Add(1)
+	go tr.readLoop(tr.closed, port)
+	port.readCh <- scriptedRead{data: []byte("ok\n")}
+
+	event := waitForNextSerialTransportEvent(t, tr.events)
+	if event.Kind != EventRX {
+		t.Fatalf("event kind = %q, want %q", event.Kind, EventRX)
+	}
+	if event.Text != "ok" {
+		t.Fatalf("event Text = %q, want %q", event.Text, "ok")
+	}
+
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
