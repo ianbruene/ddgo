@@ -3,6 +3,9 @@ package macro
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,67 +14,37 @@ import (
 
 func TestDefaultRegistration(t *testing.T) {
 	RegisterDefaultHandlers(nil)
-	if _, ok := NewRegistry().Handler(100); ok {
-		t.Fatal("NewRegistry registered M100")
+
+	supported := map[int]bool{100: true, 101: true, 102: true, 106: true, 107: true, 108: true, 109: true, 111: true, 112: true}
+	for code := range supported {
+		if _, ok := NewRegistry().Handler(code); ok {
+			t.Fatalf("NewRegistry registered M%d", code)
+		}
 	}
-	if _, ok := NewRegistry().Handler(101); ok {
-		t.Fatal("NewRegistry registered M101")
-	}
-	if _, ok := NewRegistry().Handler(102); ok {
-		t.Fatal("NewRegistry registered M102")
-	}
-	if _, ok := NewRegistry().Handler(106); ok {
-		t.Fatal("NewRegistry registered M106")
-	}
-	if _, ok := NewRegistry().Handler(107); ok {
-		t.Fatal("NewRegistry registered M107")
-	}
-	if _, ok := NewRegistry().Handler(108); ok {
-		t.Fatal("NewRegistry registered M108")
-	}
-	if _, ok := NewRegistry().Handler(109); ok {
-		t.Fatal("NewRegistry registered M109")
-	}
-	if _, ok := NewRegistry().Handler(112); ok {
-		t.Fatal("NewRegistry registered M112")
-	}
-	if _, ok := NewRegistry().Handler(111); ok {
-		t.Fatal("NewRegistry registered M111")
-	}
-	if _, ok := NewRegistry().Handler(110); ok {
-		t.Fatal("NewRegistry registered M110")
-	}
+
 	reg := NewDefaultRegistry()
-	if _, ok := reg.Handler(100); !ok {
-		t.Fatal("M100 not registered")
+	for _, code := range DefaultSupportedCodes {
+		if _, ok := supported[code]; !ok {
+			t.Fatalf("DefaultSupportedCodes includes unexpected M%d", code)
+		}
+		if _, ok := reg.Handler(code); !ok {
+			t.Fatalf("M%d not registered", code)
+		}
+		delete(supported, code)
 	}
-	if _, ok := reg.Handler(101); !ok {
-		t.Fatal("M101 not registered")
+	if len(supported) != 0 {
+		t.Fatalf("DefaultSupportedCodes missing expected commands: %#v", supported)
 	}
-	if _, ok := reg.Handler(102); !ok {
-		t.Fatal("M102 not registered")
+	for _, code := range []int{103, 104, 105, 110} {
+		if _, ok := reg.Handler(code); ok {
+			t.Fatalf("M%d registered, want intentionally undefined", code)
+		}
+		handled, err := NewDefaultEngine().Dispatch(context.Background(), &fakeRuntime{}, gcode.Line{Raw: fmt.Sprintf("M%d", code), Text: fmt.Sprintf("M%d", code)})
+		if err != nil || handled {
+			t.Fatalf("M%d handled=%v err=%v, want ordinary unregistered behavior", code, handled, err)
+		}
 	}
-	if _, ok := reg.Handler(106); !ok {
-		t.Fatal("M106 not registered")
-	}
-	if _, ok := reg.Handler(107); !ok {
-		t.Fatal("M107 not registered")
-	}
-	if _, ok := reg.Handler(108); !ok {
-		t.Fatal("M108 not registered")
-	}
-	if _, ok := reg.Handler(109); !ok {
-		t.Fatal("M109 not registered")
-	}
-	if _, ok := reg.Handler(112); !ok {
-		t.Fatal("M112 not registered")
-	}
-	if _, ok := reg.Handler(111); !ok {
-		t.Fatal("M111 not registered")
-	}
-	if _, ok := reg.Handler(110); !ok {
-		t.Fatal("M110 not registered")
-	}
+
 	rt := &fakeRuntime{}
 	handled, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Number: 1, Raw: "M107 depth 1.5", Text: "M107 depth 1.5"})
 	if err != nil || !handled {
@@ -80,6 +53,23 @@ func TestDefaultRegistration(t *testing.T) {
 	handled, err = NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Number: 2, Raw: "M108 depth G54 X", Text: "M108 depth G54 X"})
 	if err != nil || !handled {
 		t.Fatalf("M108 handled=%v err=%v", handled, err)
+	}
+}
+
+func TestMacroDocumentationMatchesDefaultSupportedCommands(t *testing.T) {
+	docPath := filepath.Join("..", "..", "docs", "macros.md")
+	body, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", docPath, err)
+	}
+	want := "The supported commands are exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`."
+	if !strings.Contains(string(body), want) {
+		t.Fatalf("macro docs do not list the supported default command set %q", want)
+	}
+	for _, forbidden := range []string{"M103` —", "M104` —", "M105` —", "M110` — enable"} {
+		if strings.Contains(string(body), forbidden) {
+			t.Fatalf("macro docs contain unsupported command section marker %q", forbidden)
+		}
 	}
 }
 
@@ -465,44 +455,6 @@ func TestM109Errors(t *testing.T) {
 			}
 			if len(tt.rt.probeArgs) != tt.wantCalls {
 				t.Fatalf("RunProbe calls = %d, want %d", len(tt.rt.probeArgs), tt.wantCalls)
-			}
-		})
-	}
-}
-
-func TestM110EnableContour(t *testing.T) {
-	contour := NewContourState()
-	for _, p := range []Point{{X: 1, Y: 1, Z: -1}, {X: 2, Y: 1, Z: -2}, {X: 3, Y: 1, Z: -3}} {
-		if err := contour.AddPoint(p); err != nil {
-			t.Fatalf("AddPoint() error = %v", err)
-		}
-	}
-	rt := &fakeRuntime{contour: contour}
-	_, err := NewDefaultEngine().Dispatch(context.Background(), rt, gcode.Line{Raw: "M110", Text: "M110"})
-	if err != nil {
-		t.Fatalf("Dispatch(M110) error = %v", err)
-	}
-	if !contour.Enabled() {
-		t.Fatal("contour enabled = false, want true")
-	}
-}
-
-func TestM110Errors(t *testing.T) {
-	tests := []struct {
-		name string
-		line string
-		rt   *fakeRuntime
-		want string
-	}{
-		{"too few points", "M110", &fakeRuntime{contour: NewContourState()}, "at least 3 contour points"},
-		{"nil contour", "M110", &fakeRuntime{}, "contour state is not available"},
-		{"unexpected args", "M110 unexpected", &fakeRuntime{contour: NewContourState()}, "unexpected arguments"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewDefaultEngine().Dispatch(context.Background(), tt.rt, gcode.Line{Raw: tt.line, Text: tt.line})
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Dispatch(%q) error = %v, want %q", tt.line, err, tt.want)
 			}
 		})
 	}

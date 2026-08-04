@@ -24,7 +24,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 
 ## What is not implemented yet
 
-- Contour surface fitting / motion rewriting / Z compensation is not implemented yet.
+- The custom macro set is intentionally non-contiguous: M103-M105 are undefined, and M110 is unsupported legacy functionality. Contour surface fitting, contour motion rewriting, and Z compensation are not active project requirements unless separately reintroduced later.
 - Machine profile/configuration is still future work.
 - Persistent user settings are still future work.
 
@@ -98,7 +98,7 @@ Notes:
 
 Current roadmap:
 
-- Implement contour surface fitting and motion rewriting.
+- Preserve the behavior of each currently supported macro explicitly identified by the corrected command list. M103-M105 are intentionally undefined. M110 is unsupported legacy functionality and does not need to be completed or preserved as a working feature.
 - Add configurable machine profile support.
 - Improve UI affordances for program and macro state.
 - Add persistence/settings as needed.
