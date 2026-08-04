@@ -13,6 +13,10 @@ Handlers receive both `RawArgs` and `CleanArgs`:
 
 Raw arguments are available for future commands where parentheses, semicolons, comments, or original spacing may matter. Unregistered commands pass through to the controller like normal G-code.
 
+## Supported macro handlers
+
+The default application macro set is intentionally non-contiguous. The supported commands are exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`. `M103`, `M104`, and `M105` are not defined, and the numbering gap does not imply missing implementations. `M110` is unsupported legacy functionality; it is explicitly rejected by program execution rather than completed or passed through.
+
 ## Implemented macro handlers
 
 ### `M100` — write midpoint between two WCS axes
@@ -128,13 +132,9 @@ Example:
 M109 G38.2 Z-5 F100
 ```
 
-### `M110` — enable contour mode
+### `M110` — unsupported legacy command
 
-```gcode
-M110
-```
-
-Enables contour mode after at least three contour points have been collected. This only sets the contour lifecycle flag for future compensation behavior. It does not fit a surface or rewrite motion yet.
+`M110` is not a supported macro. It previously represented legacy contour-enable work that never worked correctly and is not planned for completion. During program execution DDGo rejects `M110` before sending it to the controller, avoiding any controller-specific interpretation of that M-code.
 
 ### `M111` — disable contour mode
 
@@ -163,17 +163,13 @@ Registered handlers can use the current runtime to:
 - read current machine and work positions from parsed status reports;
 - run probe commands during an active program and read the last successful probe point;
 - access process-local variables;
-- access contour state, add contour points, and control the contour lifecycle.
+- access contour state, add contour points, disable contour state, and clear contour state.
 
 ## Current limitations
 
-- `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M110`, `M111`, and `M112` are registered by the default macro engine.
+- The default macro engine registers exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`.
+- `M103`, `M104`, and `M105` are intentionally undefined; there are no missing commands implied by those numbers.
+- `M110` is unsupported legacy functionality and is not planned for completion.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
-- Contour surface fitting is not implemented yet.
-- Contour motion rewriting is not implemented yet. Enabling contour mode does not affect G-code motion until surface fitting and rewriting are implemented.
-
-## Planned macro implementation order
-
-1. Contour surface fitting.
-2. Contour motion rewriting / Z compensation.
+- Contour surface fitting, contour motion rewriting, and Z compensation are not active project requirements unless separately reintroduced later.

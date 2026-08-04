@@ -465,6 +465,11 @@ func (c *Controller) runProgram(ctx context.Context, run *programRun) {
 		rewriter := c.motionRewriter
 		c.mu.RUnlock()
 
+		if inv, ok := macro.ParseInvocation(line); ok && inv.Code == 110 {
+			c.finishProgramFailure(run, &macro.Error{LineNumber: line.Number, Code: inv.Code, Err: fmt.Errorf("unsupported legacy macro")})
+			return
+		}
+
 		if engine != nil {
 			handled, err := engine.Dispatch(ctx, c, line)
 			if err != nil {
