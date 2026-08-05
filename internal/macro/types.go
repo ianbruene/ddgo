@@ -144,6 +144,14 @@ func NewEngine(registry *Registry) *Engine {
 	return &Engine{registry: registry}
 }
 
+func (e *Engine) Handles(code int) bool {
+	if e == nil || e.registry == nil {
+		return false
+	}
+	_, ok := e.registry.Handler(code)
+	return ok
+}
+
 func (e *Engine) Dispatch(ctx context.Context, runtime Runtime, line gcode.Line) (bool, error) {
 	if e == nil {
 		return false, nil
@@ -172,7 +180,10 @@ func (e *Error) Error() string {
 	if e == nil {
 		return "macro error"
 	}
-	return fmt.Sprintf("macro M%d failed at line %d: %v", e.Code, e.LineNumber, e.Err)
+	if e.LineNumber > 0 {
+		return fmt.Sprintf("macro M%d failed at line %d: %v", e.Code, e.LineNumber, e.Err)
+	}
+	return fmt.Sprintf("macro M%d failed: %v", e.Code, e.Err)
 }
 func (e *Error) Unwrap() error {
 	if e == nil {

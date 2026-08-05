@@ -4,7 +4,7 @@ This document separates DDGo's macro framework support from command behavior tha
 
 ## Macro framework status
 
-DDGo has an application-level macro interception framework. During program execution, the macro engine can intercept leading M-code-style lines when a handler is registered for that leading code. Macro numbers must be followed by whitespace or the end of the line, so prefix-like controller forms such as `M107.1` and `M107depth 1` pass through as normal G-code.
+DDGo has an application-level macro interception framework. Loaded program execution and the interactive command prompt both pass candidate commands through the same macro registry, parser, engine, and handlers before unhandled commands are sent to firmware. The macro engine can intercept leading M-code-style lines when a handler is registered for that leading code. Macro numbers must be followed by whitespace or the end of the line, so prefix-like controller forms such as `M107.1` and `M107depth 1` pass through as normal G-code.
 
 Handlers receive both `RawArgs` and `CleanArgs`:
 
@@ -15,7 +15,7 @@ Raw arguments are available for future commands where parentheses, semicolons, c
 
 ## Supported macro handlers
 
-The default application macro set is intentionally non-contiguous. The supported commands are exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`. `M103`, `M104`, and `M105` are not defined, and the numbering gap does not imply missing implementations. `M110` is unsupported legacy functionality; it is explicitly rejected by program execution rather than completed or passed through.
+The default application macro set is intentionally non-contiguous. The supported commands are exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`. `M103`, `M104`, and `M105` are not defined, and the numbering gap does not imply missing implementations. `M110` is unsupported legacy functionality; it is explicitly rejected locally from both loaded programs and the command prompt rather than completed or passed through.
 
 ## Implemented macro handlers
 
@@ -134,7 +134,7 @@ M109 G38.2 Z-5 F100
 
 ### `M110` — unsupported legacy command
 
-`M110` is not a supported macro. It previously represented legacy contour-enable work that never worked correctly and is not planned for completion. During program execution DDGo rejects `M110` before sending it to the controller, avoiding any controller-specific interpretation of that M-code.
+`M110` is not a supported macro. It previously represented legacy contour-enable work that never worked correctly and is not planned for completion. DDGo rejects `M110` from both loaded programs and the command prompt before sending it to the controller, avoiding any controller-specific interpretation of that M-code.
 
 ### `M111` — disable contour mode
 
@@ -169,7 +169,8 @@ Registered handlers can use the current runtime to:
 
 - The default macro engine registers exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`.
 - `M103`, `M104`, and `M105` are intentionally undefined; there are no missing commands implied by those numbers.
-- `M110` is unsupported legacy functionality and is not planned for completion.
+- `M110` is unsupported legacy functionality and is rejected locally from both loaded programs and the command prompt.
+- Application macros are handled by DDGo, not firmware; unregistered M-codes and ordinary G-code pass through unchanged.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
 - Contour surface fitting, contour motion rewriting, and Z compensation are not active project requirements unless separately reintroduced later.

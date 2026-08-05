@@ -41,7 +41,7 @@ Normal program sending only waits on terminal controller responses. Intermediate
 
 ## Response collection
 
-DDGo has query-scoped response collection for macro/runtime queries:
+DDGo has query-scoped response collection for macro/runtime queries owned by a response session. Program runs own a program execution session, and an interactive macro owns one short-lived interactive command session:
 
 - Normal program execution does not buffer every RX line.
 - When a macro/runtime query is active, the active run temporarily installs a query response channel.
@@ -53,7 +53,7 @@ DDGo has query-scoped response collection for macro/runtime queries:
 
 ## Macro framework
 
-The `internal/macro` package provides the application-level macro interception framework plus the current default batch of built-in command handlers. The default controller installs `macro.NewDefaultEngine()`, so registered built-ins are intercepted during normal program execution instead of being sent raw to the controller.
+The `internal/macro` package provides the application-level macro interception framework plus the current default batch of built-in command handlers. The default controller installs `macro.NewDefaultEngine()`, so registered built-ins are intercepted during both normal program execution and interactive command-prompt submission instead of being sent raw to firmware.
 
 Implemented framework pieces include:
 
@@ -69,7 +69,7 @@ Implemented framework pieces include:
 
 Empty registries and custom macro engines remain available for tests and specialized flows through `SetMacroEngine`.
 
-Current macro behavior includes probe runtime support, M109 contour point collection, and M111/M112 contour lifecycle control. M110 is rejected as unsupported legacy functionality before it can reach the controller.
+Current macro behavior includes probe runtime support, M109 contour point collection, and M111/M112 contour lifecycle control. M110 is rejected as unsupported legacy functionality before it can reach the controller from either source. M103-M105 remain intentionally undefined and follow the same pass-through policy as other unregistered commands.
 
 Currently deferred macro behavior:
 

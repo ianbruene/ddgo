@@ -2941,3 +2941,131 @@ func requireControllerErrorEventContaining(t *testing.T, events <-chan Event, wa
 		}
 	}
 }
+
+func TestControllerConsoleMacroM102NumericUsesSharedEngine(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	done := make(chan error, 1)
+	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 1 + 2 * 3") }()
+	waitForWrites(t, fake, 1)
+	if got, want := fake.Written()[0].Display, "G10 L2 P1 Z7.000000"; got != want {
+		t.Fatalf("console M102 write = %q, want %q", got, want)
+	}
+	fake.InjectRX("<Idle|MPos:0.000,0.000,0.000>")
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, done); err != nil {
+		t.Fatalf("SendConsoleLine(M102) error = %v", err)
+	}
+	for _, written := range fake.Written() {
+		if written.Display == "M102 G54Z = 1 + 2 * 3" {
+			t.Fatalf("raw M102 was sent: %#v", fake.Written())
+		}
+	}
+	state := controller.Snapshot()
+	if got, want := state.ProgramStatus, ProgramNotLoaded; got != want {
+		t.Fatalf("ProgramStatus = %v, want %v", got, want)
+	}
+	if state.ProgramTotal != 0 || state.ProgramComplete != 0 {
+		t.Fatalf("program progress changed: %+v", state)
+	}
+}
+
+func TestControllerConsoleM110RejectedLocally(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+	for _, point := range []macro.Point{{X: 1, Y: 2, Z: 3}, {X: 2, Y: 3, Z: 4}, {X: 3, Y: 4, Z: 5}} {
+		if err := controller.Contour().AddPoint(point); err != nil {
+			t.Fatalf("AddPoint() error = %v", err)
+		}
+	}
+	if err := controller.Contour().Enable(); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
+
+	err := controller.SendConsoleLine(context.Background(), "M110")
+	if err == nil || !strings.Contains(err.Error(), "unsupported legacy macro") {
+		t.Fatalf("SendConsoleLine(M110) error = %v, want unsupported legacy macro", err)
+	}
+	if got := len(fake.Written()); got != 0 {
+		t.Fatalf("M110 wrote to transport: %#v", fake.Written())
+	}
+	if !controller.Contour().Enabled() {
+		t.Fatalf("M110 disabled contour mode, want preserved")
+	}
+	if got := controller.Contour().Points(); len(got) != 3 || got[0] != (macro.Point{X: 1, Y: 2, Z: 3}) {
+		t.Fatalf("M110 changed contour points: %#v", got)
+	}
+}
+
+func TestControllerConsoleUnregisteredAndPrefixMacrosPassThrough(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	commands := []string{"M103", "M104 S1", "M105", "M107.1", "M107depth 1", "M999", "G0 X1"}
+	for _, cmd := range commands {
+		if err := controller.SendConsoleLine(context.Background(), cmd); err != nil {
+			t.Fatalf("SendConsoleLine(%q) error = %v", cmd, err)
+		}
+	}
+	waitForWrites(t, fake, len(commands))
+	for i, cmd := range commands {
+		if got := fake.Written()[i].Display; got != cmd {
+			t.Fatalf("write[%d] = %q, want %q", i, got, cmd)
+		}
+	}
+}
+
+func TestControllerConsoleRejectsSecondInteractiveMacroSession(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	first := make(chan error, 1)
+	go func() { first <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 4") }()
+	waitForWrites(t, fake, 1)
+	if err := controller.SendConsoleLine(context.Background(), "M102 G54Z = 5"); !errors.Is(err, ErrInteractiveCommandActive) {
+		t.Fatalf("second SendConsoleLine error = %v, want %v", err, ErrInteractiveCommandActive)
+	}
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, first); err != nil {
+		t.Fatalf("first SendConsoleLine error = %v", err)
+	}
+	later := make(chan error, 1)
+	go func() { later <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 6") }()
+	waitForWrites(t, fake, 2)
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, later); err != nil {
+		t.Fatalf("later SendConsoleLine error = %v", err)
+	}
+}
+
+func waitForErrorResult(t *testing.T, ch <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for command result")
+		return nil
+	}
+}
