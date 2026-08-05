@@ -655,7 +655,7 @@ func TestMockGRBLHarnessStarts(t *testing.T) {
 func TestMockGRBLDebugResetEndpoint(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMock(t, m)
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", -10, 60); err != nil {
 		t.Fatalf("start jog before debug reset: %v", err)
@@ -3114,7 +3114,7 @@ func TestDDGoJogToEndpointCompletesAgainstMock(t *testing.T) {
 		return snapshot.Connected && snapshot.HasMachinePosition
 	})
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", -1.0, 60); err != nil {
 		t.Fatalf("jog to endpoint: %v", err)
@@ -3139,7 +3139,7 @@ func TestDDGoJogToEndpointCompletesAgainstMock(t *testing.T) {
 	})
 }
 
-func TestDDGoQueuedAbsoluteJogSequencingAgainstMock(t *testing.T) {
+func TestDDGoAbsoluteJogResponseOwnershipAgainstMock(t *testing.T) {
 	const queuedJogTarget = -3.0
 	const queuedJogFeed = 120.0
 
@@ -3157,24 +3157,26 @@ func TestDDGoQueuedAbsoluteJogSequencingAgainstMock(t *testing.T) {
 			snapshot.MachineState == "Idle"
 	})
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", queuedJogTarget, queuedJogFeed); err != nil {
 		t.Fatalf("queue X absolute jog: %v", err)
 	}
-	if err := controller.JogTo(jogCtx, "Y", queuedJogTarget, queuedJogFeed); err != nil {
-		t.Fatalf("queue Y absolute jog: %v", err)
+	if err := controller.JogTo(jogCtx, "Y", queuedJogTarget, queuedJogFeed); !errors.Is(err, app.ErrInteractiveCommandActive) {
+		t.Fatalf("queue Y while X response pending error = %v, want %v", err, app.ErrInteractiveCommandActive)
 	}
-	if err := controller.JogTo(jogCtx, "Z", queuedJogTarget, queuedJogFeed); err != nil {
-		t.Fatalf("queue Z absolute jog: %v", err)
-	}
-
-	queued := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
-		return state.State == "Jog" &&
-			state.ActiveMove != nil &&
-			state.QueuedCommandCount > 0
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" && state.ActiveMove == nil && near(state.MachinePosition[0], queuedJogTarget, posTol)
 	})
-	t.Logf("observed queued jog state: %+v", queued)
+	if err := controller.JogTo(jogCtx, "Y", queuedJogTarget, queuedJogFeed); err != nil {
+		t.Fatalf("queue Y absolute jog after X completion: %v", err)
+	}
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.State == "Idle" && state.ActiveMove == nil && near(state.MachinePosition[1], queuedJogTarget, posTol)
+	})
+	if err := controller.JogTo(jogCtx, "Z", queuedJogTarget, queuedJogFeed); err != nil {
+		t.Fatalf("queue Z absolute jog after Y completion: %v", err)
+	}
 
 	finalMock := waitForMockState(t, m, 15*time.Second, func(state mockState) bool {
 		return state.State == "Idle" &&
@@ -3207,7 +3209,7 @@ func TestDDGoHomeActionAgainstMock(t *testing.T) {
 		return snapshot.Connected && snapshot.MachineState == "Idle" && snapshot.HasMachinePosition
 	})
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", -1, 60); err != nil {
 		t.Fatalf("jog before home: %v", err)
@@ -3302,7 +3304,7 @@ func TestDDGoRealtimeHoldResumeDuringJogAgainstMock(t *testing.T) {
 			near(snapshot.MachinePosition[0], 0, posTol)
 	})
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", -86.5, 60); err != nil {
 		t.Fatalf("start long absolute jog: %v", err)
@@ -3544,7 +3546,7 @@ func TestDDGoRealtimeResetDuringJogAgainstMock(t *testing.T) {
 			near(snapshot.MachinePosition[0], 0, posTol)
 	})
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", -86.5, 60); err != nil {
 		t.Fatalf("start long absolute jog: %v", err)
@@ -3602,7 +3604,7 @@ func TestDDGoStatusReportsDuringAndAfterMockJog(t *testing.T) {
 			near(snapshot.MachinePosition[0], 0, posTol)
 	})
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	const statusJogTarget = -3.0
 	const statusJogFeed = 60.0
@@ -3667,7 +3669,7 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 	})
 	baselineX := baseline.MachinePosition[0]
 
-	jogCtx, jogCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	jogCtx, jogCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer jogCancel()
 	if err := controller.JogTo(jogCtx, "X", -999.0, 60); err != nil {
 		t.Logf("out-of-bounds JogTo returned write error: %v", err)

@@ -43,6 +43,16 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Race test controller ownership
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./internal/app ./internal/macro
+
+      - name: Repeated focused command admission tests
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go test -count=20 ./internal/app -run 'ResponseOwner|Interactive|ManualLine|Disconnect|CommandAdmission|DelayedManualLineResponse'
+
       - name: Test serial-tagged packages
         if: matrix.os == 'ubuntu-latest'
         run: go test -tags serial ./internal/transport ./internal/ports ./internal/app ./internal/grbl

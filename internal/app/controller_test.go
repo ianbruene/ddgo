@@ -350,15 +350,15 @@ func TestControllerConnectSendJogActionAndReceive(t *testing.T) {
 	if err := controller.SendConsoleLine(context.Background(), "G0 X10"); err != nil {
 		t.Fatalf("SendConsoleLine() error = %v", err)
 	}
+	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := controller.Jog(context.Background(), "X", 1.5, 250); err != nil {
 		t.Fatalf("Jog() error = %v", err)
 	}
+	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := controller.Action(context.Background(), grbl.ActionStatus); err != nil {
 		t.Fatalf("Action() error = %v", err)
-	}
-
-	for i := 0; i < 3; i++ {
-		_ = waitForEvent(t, controller.Events(), EventConsoleTX)
 	}
 
 	fake.InjectRX("<Idle|MPos:0.000,0.000,0.000>")
@@ -2005,7 +2005,9 @@ func TestControllerSendLineCollectingResponsesRejectsConcurrentQuery(t *testing.
 	}
 
 	controller.mu.Lock()
+	run.session = newResponseSession(run.rxCh)
 	controller.run = run
+	controller.responseOwner = responseOwner{kind: responseOwnerProgram, session: run.session}
 	controller.state.ProgramStatus = ProgramRunning
 	controller.mu.Unlock()
 
@@ -2026,8 +2028,10 @@ func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *tes
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
 	run := &programRun{rxCh: make(chan string, 1)}
+	run.session = newResponseSession(run.rxCh)
 	controller.mu.Lock()
 	controller.run = run
+	controller.responseOwner = responseOwner{kind: responseOwnerProgram, session: run.session}
 	controller.state.ProgramStatus = ProgramRunning
 	controller.mu.Unlock()
 
@@ -2959,6 +2963,7 @@ func TestControllerConsoleMacroM102NumericUsesSharedEngine(t *testing.T) {
 	}
 	fake.InjectRX("<Idle|MPos:0.000,0.000,0.000>")
 	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := waitForErrorResult(t, done); err != nil {
 		t.Fatalf("SendConsoleLine(M102) error = %v", err)
 	}
@@ -3022,6 +3027,8 @@ func TestControllerConsoleUnregisteredAndPrefixMacrosPassThrough(t *testing.T) {
 		if err := controller.SendConsoleLine(context.Background(), cmd); err != nil {
 			t.Fatalf("SendConsoleLine(%q) error = %v", cmd, err)
 		}
+		fake.InjectRX("ok")
+		_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	}
 	waitForWrites(t, fake, len(commands))
 	for i, cmd := range commands {
@@ -3092,6 +3099,7 @@ func TestControllerStartProgramRejectedWhileInteractiveMacroWaitingOK(t *testing
 	}
 
 	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := waitForErrorResult(t, done); err != nil {
 		t.Fatalf("interactive macro error = %v", err)
 	}
@@ -3130,6 +3138,7 @@ func TestControllerStartProgramRejectedWhileInteractiveMacroQueryActive(t *testi
 	fake.InjectRX("[G54:0.000,0.000,4.000]")
 	fake.InjectRX("[G55:0.000,0.000,4.000]")
 	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := waitForErrorResult(t, done); err != nil {
 		t.Fatalf("interactive macro error = %v", err)
 	}
@@ -3152,7 +3161,7 @@ func TestControllerInteractiveMacroExitsOnUnexpectedDisconnect(t *testing.T) {
 		t.Fatalf("interactive macro error = %v, want %v", err, ErrTransportDisconnected)
 	}
 	controller.mu.RLock()
-	active := controller.interactiveSession != nil
+	active := controller.responseOwner.kind == responseOwnerInteractiveMacro
 	controller.mu.RUnlock()
 	if active {
 		t.Fatal("interactiveSession still active after unexpected disconnect")
@@ -3209,7 +3218,7 @@ func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
 	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 4") }()
 	waitForWrites(t, fake, 1)
 	before := len(fake.Written())
-	for _, cmd := range []string{"G0 X9", "M103", "M999", "$I", "?", "M107.1"} {
+	for _, cmd := range []string{"G0 X9", "M103", "M999", "$I", "M107.1"} {
 		if err := controller.SendConsoleLine(context.Background(), cmd); !errors.Is(err, ErrInteractiveCommandActive) {
 			t.Fatalf("SendConsoleLine(%q) error = %v, want %v", cmd, err, ErrInteractiveCommandActive)
 		}
@@ -3217,11 +3226,12 @@ func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
 	if err := controller.Jog(context.Background(), "X", 1, 100); !errors.Is(err, ErrInteractiveCommandActive) {
 		t.Fatalf("Jog() error = %v, want %v", err, ErrInteractiveCommandActive)
 	}
-	if err := controller.Action(context.Background(), grbl.ActionStatus); !errors.Is(err, ErrInteractiveCommandActive) {
-		t.Fatalf("Action(status) error = %v, want %v", err, ErrInteractiveCommandActive)
+	if err := controller.Action(context.Background(), grbl.ActionStatus); err != nil {
+		t.Fatalf("Action(status) error = %v, want realtime status allowed during interactive macro", err)
 	}
-	ensureWritesStayAt(t, fake, before, noExtraLifecycleEventWindow)
+	ensureWritesStayAt(t, fake, before+1, noExtraLifecycleEventWindow)
 	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := waitForErrorResult(t, done); err != nil {
 		t.Fatalf("interactive macro error = %v", err)
 	}
@@ -3229,6 +3239,8 @@ func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
 		if err := controller.SendConsoleLine(context.Background(), cmd); err != nil {
 			t.Fatalf("SendConsoleLine(%q) after macro error = %v", cmd, err)
 		}
+		fake.InjectRX("ok")
+		_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	}
 	waitForWrites(t, fake, before+4)
 }
@@ -3242,4 +3254,74 @@ func waitForErrorResult(t *testing.T, ch <-chan error) error {
 		t.Fatal("timed out waiting for command result")
 		return nil
 	}
+}
+
+func TestControllerDelayedManualLineResponseOwnsAdmission(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	if err := controller.SendConsoleLine(context.Background(), "G0 X1"); err != nil {
+		t.Fatalf("SendConsoleLine() error = %v", err)
+	}
+	waitForWrites(t, fake, 1)
+	if err := controller.SendConsoleLine(context.Background(), "M102 G54Z = 1"); !errors.Is(err, ErrInteractiveCommandActive) {
+		t.Fatalf("interactive while manual pending error = %v, want %v", err, ErrInteractiveCommandActive)
+	}
+	path := writeProgramFile(t, "delayed.nc", "G0 X0\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	if err := controller.StartProgram(context.Background()); !errors.Is(err, ErrProgramActive) {
+		t.Fatalf("StartProgram() while manual pending error = %v, want %v", err, ErrProgramActive)
+	}
+
+	fake.InjectRX("ok")
+	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
+	go func() { _ = controller.SendConsoleLine(context.Background(), "M102 G54Z = 1") }()
+	waitForWrites(t, fake, 2)
+	fake.InjectRX("ok")
+}
+
+func TestControllerManualLineReleasesOnErrorAlarmAndDisconnect(t *testing.T) {
+	for _, terminal := range []string{"error:1", "ALARM:1"} {
+		t.Run(terminal, func(t *testing.T) {
+			fake := transport.NewFakeTransport()
+			controller := NewController(fake, nil)
+			controller.statusPollInterval = time.Hour
+			if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+				t.Fatalf("Connect() error = %v", err)
+			}
+			drainEvents(controller.Events())
+			if err := controller.SendConsoleLine(context.Background(), "M999"); err != nil {
+				t.Fatalf("SendConsoleLine() error = %v", err)
+			}
+			fake.InjectRX(terminal)
+			_ = waitForEvent(t, controller.Events(), EventConsoleRX)
+			if err := controller.SendConsoleLine(context.Background(), "G0 X2"); err != nil {
+				t.Fatalf("later SendConsoleLine() error = %v", err)
+			}
+		})
+	}
+	t.Run("disconnect", func(t *testing.T) {
+		fake := transport.NewFakeTransport()
+		controller := NewController(fake, nil)
+		controller.statusPollInterval = time.Hour
+		if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+			t.Fatalf("Connect() error = %v", err)
+		}
+		drainEvents(controller.Events())
+		if err := controller.SendConsoleLine(context.Background(), "G0 X1"); err != nil {
+			t.Fatalf("SendConsoleLine() error = %v", err)
+		}
+		fake.InjectDisconnected()
+		_ = waitForEvent(t, controller.Events(), EventStateChanged)
+		if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake2")); err != nil {
+			t.Fatalf("Reconnect error = %v", err)
+		}
+	})
 }

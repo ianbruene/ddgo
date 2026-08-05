@@ -32,6 +32,20 @@ type responseSession struct {
 	cancel    context.CancelCauseFunc
 }
 
+type responseOwnerKind int
+
+const (
+	responseOwnerNone responseOwnerKind = iota
+	responseOwnerProgram
+	responseOwnerInteractiveMacro
+	responseOwnerManualLine
+)
+
+type responseOwner struct {
+	kind    responseOwnerKind
+	session *responseSession
+}
+
 type programRun struct {
 	program   gcode.Program
 	session   *responseSession
@@ -48,7 +62,7 @@ type Controller struct {
 	state                             State
 	loaded                            gcode.Program
 	run                               *programRun
-	interactiveSession                *responseSession
+	responseOwner                     responseOwner
 	statusPollCancel                  context.CancelFunc
 	statusPollDone                    chan struct{}
 	statusPollInterval                time.Duration
@@ -120,10 +134,13 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		c.emitError(err)
 		return err
 	}
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
+	c.mu.Lock()
+	if err := c.responseOwnerBusyErrorLocked(responseOwnerProgram); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
 	}
+	c.mu.Unlock()
 	if err := c.transport.Open(ctx, cfg); err != nil {
 		c.emitError(err)
 		return err
@@ -148,7 +165,7 @@ func (c *Controller) Disconnect() error {
 	}
 	c.stopStatusPolling()
 	c.mu.Lock()
-	c.terminateInteractiveSessionLocked(c.interactiveSession, ErrTransportDisconnected)
+	c.terminateResponseOwnerLocked(c.responseOwner, ErrTransportDisconnected)
 	c.suppressNextTransportDisconnected = c.state.Connected
 	c.mu.Unlock()
 	if err := c.transport.Close(); err != nil {
@@ -171,6 +188,16 @@ func (c *Controller) Disconnect() error {
 func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "?" {
 		c.clearPendingQuietStatusReports()
+		msg, err := grbl.BuildAction(grbl.ActionStatus)
+		if err != nil {
+			c.emitError(err)
+			return err
+		}
+		if err := c.transport.Write(ctx, msg); err != nil {
+			c.emitError(err)
+			return err
+		}
+		return nil
 	}
 	line, parseOK := parseConsoleGCodeLine(text)
 	if parseOK {
@@ -194,10 +221,26 @@ func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 		}
 	}
 
-	if err := c.rejectManualWriteIfBusy(); err != nil {
+	return c.writeManualLine(ctx, text)
+}
+
+func (c *Controller) writeManualLine(ctx context.Context, text string) error {
+	return c.writeManualResponseMessage(ctx, transport.NewLineMessage(text))
+}
+
+func (c *Controller) writeManualResponseMessage(ctx context.Context, msg transport.Message) error {
+	session := newResponseSession(make(chan string, 1))
+	c.mu.Lock()
+	if err := c.acquireResponseOwnerLocked(responseOwnerManualLine, session); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
 		return err
 	}
-	if err := c.transport.Write(ctx, transport.NewLineMessage(text)); err != nil {
+	c.mu.Unlock()
+	if err := c.transport.Write(ctx, msg); err != nil {
+		c.mu.Lock()
+		c.releaseResponseOwnerLocked(responseOwnerManualLine, session)
+		c.mu.Unlock()
 		c.emitError(err)
 		return err
 	}
@@ -207,10 +250,8 @@ func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 func (c *Controller) rejectManualWriteIfBusy() error {
 	c.mu.RLock()
 	var err error
-	if c.state.ProgramStatus.IsActive() || c.run != nil {
-		err = ErrProgramActive
-	} else if c.interactiveSession != nil {
-		err = ErrInteractiveCommandActive
+	if c.responseOwner.kind != responseOwnerNone {
+		err = c.responseOwnerBusyErrorLocked(responseOwnerManualLine)
 	}
 	c.mu.RUnlock()
 	if err != nil {
@@ -228,11 +269,7 @@ func (c *Controller) Jog(ctx context.Context, axis string, delta float64, feed f
 		c.emitError(err)
 		return err
 	}
-	if err := c.transport.Write(ctx, msg); err != nil {
-		c.emitError(err)
-		return err
-	}
-	return nil
+	return c.writeManualResponseMessage(ctx, msg)
 }
 
 func (c *Controller) JogTo(ctx context.Context, axis string, target float64, feed float64) error {
@@ -244,14 +281,17 @@ func (c *Controller) JogTo(ctx context.Context, axis string, target float64, fee
 		c.emitError(err)
 		return err
 	}
-	if err := c.transport.Write(ctx, msg); err != nil {
-		c.emitError(err)
-		return err
-	}
-	return nil
+	return c.writeManualResponseMessage(ctx, msg)
 }
 
 func (c *Controller) StopMotion(ctx context.Context) error {
+	c.mu.RLock()
+	programActive := c.state.ProgramStatus.IsActive() || c.run != nil
+	c.mu.RUnlock()
+	if programActive {
+		c.emitError(ErrProgramActive)
+		return ErrProgramActive
+	}
 	if err := c.rejectManualWriteIfBusy(); err != nil {
 		return err
 	}
@@ -338,10 +378,14 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 }
 
 func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
-	if err := c.rejectManualWriteIfBusy(); err != nil {
-		return err
-	}
 	if action == grbl.ActionStatus {
+		c.mu.RLock()
+		programActive := c.state.ProgramStatus.IsActive() || c.run != nil
+		c.mu.RUnlock()
+		if programActive {
+			c.emitError(ErrProgramActive)
+			return ErrProgramActive
+		}
 		c.clearPendingQuietStatusReports()
 	}
 	msg, err := grbl.BuildAction(action)
@@ -349,11 +393,28 @@ func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
 		c.emitError(err)
 		return err
 	}
+	if actionProducesTerminalResponse(action) {
+		return c.writeManualResponseMessage(ctx, msg)
+	}
 	if err := c.transport.Write(ctx, msg); err != nil {
 		c.emitError(err)
 		return err
 	}
 	return nil
+}
+
+// actionProducesTerminalResponse documents GRBL command ownership for UI/manual actions.
+// Unlock ($X) and home ($H) are line commands that end in ok/error/alarm, so they
+// reserve manual response ownership. Status (?) and realtime controls (!, ~, Ctrl-X,
+// jog-cancel) do not emit terminal ok responses; they are allowed as protocol-level
+// realtime exceptions and must not complete or release the current owner.
+func actionProducesTerminalResponse(action grbl.Action) bool {
+	switch action {
+	case grbl.ActionUnlock, grbl.ActionHome:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Controller) LoadProgramFile(path string) error {
@@ -382,14 +443,15 @@ func (c *Controller) LoadProgramFile(path string) error {
 
 func (c *Controller) StartProgram(ctx context.Context) error {
 	c.mu.Lock()
-	if c.interactiveSession != nil {
-		c.mu.Unlock()
-		c.emitError(ErrInteractiveCommandActive)
-		return ErrInteractiveCommandActive
-	}
 	if c.run != nil || c.state.ProgramStatus.IsActive() {
 		c.mu.Unlock()
 		err := errors.New("program is already running")
+		c.emitError(err)
+		return err
+	}
+	if c.responseOwner.kind != responseOwnerNone {
+		err := c.responseOwnerBusyErrorLocked(responseOwnerProgram)
+		c.mu.Unlock()
 		c.emitError(err)
 		return err
 	}
@@ -418,6 +480,11 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 		cancel:  cancel,
 	}
 	run.session = newResponseSession(run.rxCh)
+	if err := c.acquireResponseOwnerLocked(responseOwnerProgram, run.session); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
 	c.run = run
 	c.state.ProgramStatus = ProgramRunning
 	c.state.ProgramComplete = 0
@@ -491,6 +558,7 @@ func (c *Controller) StopProgram(ctx context.Context) error {
 		return err
 	}
 	c.run = nil
+	c.releaseResponseOwnerLocked(responseOwnerProgram, run.responseSession())
 	c.state.ProgramStatus = ProgramStopped
 	state := c.state
 	c.mu.Unlock()
@@ -683,6 +751,7 @@ func (c *Controller) finishProgramSuccess(run *programRun) {
 		return
 	}
 	c.run = nil
+	c.releaseResponseOwnerLocked(responseOwnerProgram, run.responseSession())
 	c.state.ProgramStatus = ProgramCompleted
 	c.state.ProgramComplete = c.state.ProgramTotal
 	state := c.state
@@ -701,6 +770,7 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 		return
 	}
 	c.run = nil
+	c.releaseResponseOwnerLocked(responseOwnerProgram, run.responseSession())
 	c.state.ProgramStatus = ProgramFailed
 	c.state.LastError = err.Error()
 	c.contour.Disable()
@@ -730,8 +800,8 @@ func (c *Controller) handleTransportDisconnected() {
 	} else {
 		c.state.LastError = ""
 	}
-	interactive := c.interactiveSession
-	c.terminateInteractiveSessionLocked(interactive, err)
+	owner := c.responseOwner
+	c.terminateResponseOwnerLocked(owner, err)
 	changed := c.clearConnectionStateLocked()
 	state := c.state
 	c.mu.Unlock()
@@ -739,10 +809,10 @@ func (c *Controller) handleTransportDisconnected() {
 	if cancel != nil {
 		cancel()
 	}
-	if changed || run != nil || interactive != nil {
+	if changed || run != nil || owner.kind != responseOwnerNone {
 		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: err.Error()}
 	}
-	if run != nil || interactive != nil {
+	if run != nil || owner.kind != responseOwnerNone {
 		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
 	}
 }
@@ -931,29 +1001,38 @@ func (c *Controller) consumeExpectedTransportDisconnected() bool {
 }
 
 func (c *Controller) deliverResponseLocked(line string) *programRun {
-	if c.interactiveSession != nil && c.run != nil {
-		c.terminateInteractiveSessionLocked(c.interactiveSession, ErrCommandSessionInvariant)
-		c.run.cancel()
-		c.run = nil
-		c.state.ProgramStatus = ProgramFailed
+	owner := c.responseOwner
+	switch owner.kind {
+	case responseOwnerNone:
+		return nil
+	case responseOwnerManualLine:
+		if isProgramResponse(line) {
+			c.releaseResponseOwnerLocked(responseOwnerManualLine, owner.session)
+		}
+		return nil
+	case responseOwnerInteractiveMacro:
+		if deliverToSession(owner.session, line) {
+			return nil
+		}
+		c.terminateResponseOwnerLocked(owner, ErrResponseBacklogFull)
+		return nil
+	case responseOwnerProgram:
+		run := c.run
+		if run == nil || run.responseSession() != owner.session {
+			c.terminateResponseOwnerLocked(owner, ErrCommandSessionInvariant)
+			c.state.ProgramStatus = ProgramFailed
+			c.state.LastError = ErrCommandSessionInvariant.Error()
+			return nil
+		}
+		if deliverToSession(owner.session, line) {
+			return nil
+		}
+		return run
+	default:
+		c.responseOwner = responseOwner{}
 		c.state.LastError = ErrCommandSessionInvariant.Error()
 		return nil
 	}
-	if c.interactiveSession != nil {
-		if deliverToSession(c.interactiveSession, line) {
-			return nil
-		}
-		c.terminateInteractiveSessionLocked(c.interactiveSession, ErrResponseBacklogFull)
-		return nil
-	}
-	run := c.run
-	if run == nil {
-		return nil
-	}
-	if deliverToSession(run.responseSession(), line) {
-		return nil
-	}
-	return run
 }
 
 func deliverToSession(session *responseSession, line string) bool {
