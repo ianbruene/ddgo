@@ -62,15 +62,60 @@ func (c *Controller) executeApplicationCommand(ctx context.Context, runtime macr
 func (c *Controller) beginInteractiveSession() (*responseSession, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.run != nil || c.state.ProgramStatus.IsActive() {
-		return nil, ErrProgramActive
-	}
-	if c.interactiveSession != nil {
-		return nil, ErrInteractiveCommandActive
-	}
 	session := newResponseSession(make(chan string, 64))
-	c.interactiveSession = session
+	if err := c.acquireResponseOwnerLocked(responseOwnerInteractiveMacro, session); err != nil {
+		return nil, err
+	}
 	return session, nil
+}
+
+func (c *Controller) acquireResponseOwnerLocked(kind responseOwnerKind, session *responseSession) error {
+	if err := c.responseOwnerBusyErrorLocked(kind); err != nil {
+		return err
+	}
+	c.responseOwner = responseOwner{kind: kind, session: session}
+	return nil
+}
+
+func (c *Controller) responseOwnerBusyErrorLocked(requested responseOwnerKind) error {
+	switch c.responseOwner.kind {
+	case responseOwnerProgram:
+		return ErrProgramActive
+	case responseOwnerInteractiveMacro:
+		return ErrInteractiveCommandActive
+	case responseOwnerManualLine:
+		if requested == responseOwnerProgram {
+			return ErrProgramActive
+		}
+		return ErrInteractiveCommandActive
+	default:
+		if c.run != nil || c.state.ProgramStatus.IsActive() {
+			return ErrProgramActive
+		}
+		return nil
+	}
+}
+
+func (c *Controller) releaseResponseOwnerLocked(kind responseOwnerKind, session *responseSession) bool {
+	if c.responseOwner.kind != kind || c.responseOwner.session != session {
+		return false
+	}
+	c.responseOwner = responseOwner{}
+	return true
+}
+
+func (c *Controller) terminateResponseOwnerLocked(owner responseOwner, cause error) bool {
+	if owner.kind == responseOwnerNone || c.responseOwner != owner {
+		return false
+	}
+	c.responseOwner = responseOwner{}
+	if cause == nil {
+		cause = ErrCommandSessionCanceled
+	}
+	if owner.session != nil {
+		owner.session.cancel(cause)
+	}
+	return true
 }
 
 func newResponseSession(rxCh chan string) *responseSession {
@@ -96,20 +141,12 @@ func (s *responseSession) Err() error {
 }
 
 func (c *Controller) terminateInteractiveSessionLocked(session *responseSession, cause error) bool {
-	if session == nil || c.interactiveSession != session {
-		return false
-	}
-	c.interactiveSession = nil
-	if cause == nil {
-		cause = ErrCommandSessionCanceled
-	}
-	session.cancel(cause)
-	return true
+	return c.terminateResponseOwnerLocked(responseOwner{kind: responseOwnerInteractiveMacro, session: session}, cause)
 }
 
 func (c *Controller) endInteractiveSession(session *responseSession, cause error) {
 	c.mu.Lock()
-	c.terminateInteractiveSessionLocked(session, cause)
+	c.terminateResponseOwnerLocked(responseOwner{kind: responseOwnerInteractiveMacro, session: session}, cause)
 	c.mu.Unlock()
 }
 
