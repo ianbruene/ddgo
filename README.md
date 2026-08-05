@@ -13,7 +13,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 - Status polling and status parsing for machine state, machine position, work position, feed, and spindle values.
 - G-code file loading through `internal/gcode`.
 - Program execution with pause, resume, stop, progress tracking, and terminal-response handling.
-- Macro interception framework for registered application-level macro handlers, with default built-in handlers for M100 midpoint write/verify, M101 WCS comparison, M102 expression write, M106 assertions, M107 variable store, M108 variable writeback, M109 contour point collection, and contour lifecycle control.
+- Macro interception framework for registered application-level macro handlers from both loaded G-code programs and the interactive command prompt, with default built-in handlers for M100 midpoint write/verify, M101 WCS comparison, M102 expression write, M106 assertions, M107 variable store, M108 variable writeback, M109 contour point collection, and contour lifecycle control.
 - Macro runtime query support for collecting query responses during an active program run.
 - Macro runtime probe execution and last successful probe point capture.
 - Contour point collection and lifecycle control through default macro handlers.
@@ -24,7 +24,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 
 ## What is not implemented yet
 
-- The custom macro set is intentionally non-contiguous: M103-M105 are undefined, and M110 is unsupported legacy functionality. Contour surface fitting, contour motion rewriting, and Z compensation are not active project requirements unless separately reintroduced later.
+- The custom macro set is intentionally non-contiguous: M103-M105 are undefined and pass through like other unregistered commands, while M110 is unsupported legacy functionality rejected locally from files and the command prompt. Contour surface fitting, contour motion rewriting, and Z compensation are not active project requirements unless separately reintroduced later.
 - Machine profile/configuration is still future work.
 - Persistent user settings are still future work.
 

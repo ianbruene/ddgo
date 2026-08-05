@@ -17,11 +17,18 @@ import (
 
 var ErrProgramActive = errors.New("program is running; manual controls are disabled")
 var ErrProgramQueryActive = errors.New("program query is already active")
+var ErrInteractiveCommandActive = errors.New("interactive command is already active")
 
 const defaultStatusPollInterval = 500 * time.Millisecond
 
+type responseSession struct {
+	rxCh      chan string
+	queryRxCh chan string
+}
+
 type programRun struct {
 	program   gcode.Program
+	session   *responseSession
 	rxCh      chan string
 	queryRxCh chan string
 	cancel    context.CancelFunc
@@ -35,6 +42,7 @@ type Controller struct {
 	state                             State
 	loaded                            gcode.Program
 	run                               *programRun
+	interactiveSession                *responseSession
 	statusPollCancel                  context.CancelFunc
 	statusPollDone                    chan struct{}
 	statusPollInterval                time.Duration
@@ -153,15 +161,38 @@ func (c *Controller) Disconnect() error {
 	return nil
 }
 
-func (c *Controller) SendConsoleLine(ctx context.Context, line string) error {
-	if strings.TrimSpace(line) == "?" {
+func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
+	if strings.TrimSpace(text) == "?" {
 		c.clearPendingQuietStatusReports()
 	}
 	if c.Snapshot().ProgramStatus.IsActive() {
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
 	}
-	if err := c.transport.Write(ctx, transport.NewLineMessage(line)); err != nil {
+
+	line, parseOK := parseConsoleGCodeLine(text)
+	if parseOK {
+		c.mu.RLock()
+		engine := c.macroEngine
+		c.mu.RUnlock()
+		if commandCanBeApplicationMacro(line, engine) {
+			session, err := c.beginInteractiveSession()
+			if err != nil {
+				c.emitError(err)
+				return err
+			}
+			runtime := c.runtimeForSession(session)
+			err = c.executeApplicationCommand(ctx, runtime, line, engine)
+			c.endInteractiveSession(session)
+			if err != nil {
+				c.emitError(err)
+				return err
+			}
+			return nil
+		}
+	}
+
+	if err := c.transport.Write(ctx, transport.NewLineMessage(text)); err != nil {
 		c.emitError(err)
 		return err
 	}
@@ -365,6 +396,7 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 		rxCh:    make(chan string, 64),
 		cancel:  cancel,
 	}
+	run.session = &responseSession{rxCh: run.rxCh}
 	c.run = run
 	c.state.ProgramStatus = ProgramRunning
 	c.state.ProgramComplete = 0
@@ -465,26 +497,18 @@ func (c *Controller) runProgram(ctx context.Context, run *programRun) {
 		rewriter := c.motionRewriter
 		c.mu.RUnlock()
 
-		if inv, ok := macro.ParseInvocation(line); ok && inv.Code == 110 {
-			c.finishProgramFailure(run, &macro.Error{LineNumber: line.Number, Code: inv.Code, Err: fmt.Errorf("unsupported legacy macro")})
+		runtime := c.runtimeForProgramRun(run)
+		if handled, err := c.dispatchApplicationCommand(ctx, runtime, line, engine); err != nil {
+			c.finishProgramFailure(run, err)
 			return
-		}
-
-		if engine != nil {
-			handled, err := engine.Dispatch(ctx, c, line)
-			if err != nil {
-				c.finishProgramFailure(run, err)
-				return
-			}
-			if handled {
-				c.updateProgramProgress(run, idx+1)
-				continue
-			}
+		} else if handled {
+			c.updateProgramProgress(run, idx+1)
+			continue
 		}
 
 		outgoing := line.Text
 		if rewriter != nil {
-			rewritten, changed, err := rewriter.RewriteMotion(ctx, c, line)
+			rewritten, changed, err := rewriter.RewriteMotion(ctx, runtime, line)
 			if err != nil {
 				c.finishProgramFailure(run, fmt.Errorf("rewrite line %d: %w", line.Number, err))
 				return
@@ -494,7 +518,7 @@ func (c *Controller) runProgram(ctx context.Context, run *programRun) {
 			}
 		}
 
-		if err := c.sendLineAndWaitOK(ctx, run, outgoing, line.Number); err != nil {
+		if err := runtime.sendLineAndWaitOK(ctx, outgoing, line.Number); err != nil {
 			c.finishProgramFailure(run, err)
 			return
 		}
@@ -510,7 +534,7 @@ func (c *Controller) SendLineAndWaitOK(ctx context.Context, line string) error {
 	if run == nil {
 		return errors.New("no active program run")
 	}
-	return c.sendLineAndWaitOK(ctx, run, line, 0)
+	return c.runtimeForProgramRun(run).sendLineAndWaitOK(ctx, line, 0)
 }
 
 func (c *Controller) SendLineCollectingResponses(ctx context.Context, line string) ([]string, error) {
@@ -520,10 +544,11 @@ func (c *Controller) SendLineCollectingResponses(ctx context.Context, line strin
 	if run == nil {
 		return nil, errors.New("no active program run")
 	}
-	return c.sendLineCollectingResponses(ctx, run, line)
+	return c.runtimeForProgramRun(run).sendLineCollectingResponses(ctx, line)
 }
 
-func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, line string, sourceLine int) error {
+func (r *commandRuntime) sendLineAndWaitOK(ctx context.Context, line string, sourceLine int) error {
+	c := r.controller
 	msg := transport.NewLineMessage(line)
 	if err := c.transport.Write(ctx, msg); err != nil {
 		if sourceLine > 0 {
@@ -535,7 +560,7 @@ func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, lin
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case rx := <-run.rxCh:
+		case rx := <-r.session.rxCh:
 			status := classifyProgramResponse(rx)
 			switch status {
 			case responseIgnore:
@@ -552,24 +577,21 @@ func (c *Controller) sendLineAndWaitOK(ctx context.Context, run *programRun, lin
 	}
 }
 
-func (c *Controller) sendLineCollectingResponses(ctx context.Context, run *programRun, line string) ([]string, error) {
+func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line string) ([]string, error) {
+	c := r.controller
 	c.mu.Lock()
-	if c.run != run {
-		c.mu.Unlock()
-		return nil, context.Canceled
-	}
-	if run.queryRxCh != nil {
+	if r.session.queryRxCh != nil {
 		c.mu.Unlock()
 		return nil, ErrProgramQueryActive
 	}
 	queryCh := make(chan string, 256)
-	run.queryRxCh = queryCh
+	r.session.queryRxCh = queryCh
 	c.mu.Unlock()
 
 	defer func() {
 		c.mu.Lock()
-		if c.run == run && run.queryRxCh == queryCh {
-			run.queryRxCh = nil
+		if r.session.queryRxCh == queryCh {
+			r.session.queryRxCh = nil
 		}
 		c.mu.Unlock()
 	}()
@@ -768,6 +790,10 @@ func (c *Controller) RunProbe(ctx context.Context, args string) (macro.Point, er
 	if err != nil {
 		return macro.Point{}, err
 	}
+	return c.probePointFromResponses(lines)
+}
+
+func (c *Controller) probePointFromResponses(lines []string) (macro.Point, error) {
 	for _, line := range lines {
 		result, ok := grbl.ParseProbeResult(line)
 		if !ok {
@@ -852,7 +878,7 @@ func (c *Controller) runTransportEventBridge() {
 					c.state.HasFeedSpindle = true
 				}
 			}
-			overflowRun := c.deliverProgramResponseLocked(ev.Text)
+			overflowRun := c.deliverResponseLocked(ev.Text)
 			state := c.state
 			c.mu.Unlock()
 			if overflowRun != nil {
@@ -877,27 +903,39 @@ func (c *Controller) consumeExpectedTransportDisconnected() bool {
 	return true
 }
 
-func (c *Controller) deliverProgramResponseLocked(line string) *programRun {
+func (c *Controller) deliverResponseLocked(line string) *programRun {
+	if c.interactiveSession != nil {
+		if deliverToSession(c.interactiveSession, line) {
+			return nil
+		}
+	}
 	run := c.run
 	if run == nil {
 		return nil
 	}
-	if run.queryRxCh != nil {
+	if deliverToSession(run.responseSession(), line) {
+		return nil
+	}
+	return run
+}
+
+func deliverToSession(session *responseSession, line string) bool {
+	if session.queryRxCh != nil {
 		select {
-		case run.queryRxCh <- line:
-			return nil
+		case session.queryRxCh <- line:
+			return true
 		default:
-			return run
+			return false
 		}
 	}
 	if !isProgramResponse(line) {
-		return nil
+		return true
 	}
 	select {
-	case run.rxCh <- line:
-		return nil
+	case session.rxCh <- line:
+		return true
 	default:
-		return run
+		return false
 	}
 }
 
