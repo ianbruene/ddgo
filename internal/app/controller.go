@@ -18,12 +18,18 @@ import (
 var ErrProgramActive = errors.New("program is running; manual controls are disabled")
 var ErrProgramQueryActive = errors.New("program query is already active")
 var ErrInteractiveCommandActive = errors.New("interactive command is already active")
+var ErrTransportDisconnected = errors.New("transport disconnected")
+var ErrCommandSessionCanceled = errors.New("command session canceled")
+var ErrResponseBacklogFull = errors.New("response backlog full")
+var ErrCommandSessionInvariant = errors.New("controller command session invariant violated")
 
 const defaultStatusPollInterval = 500 * time.Millisecond
 
 type responseSession struct {
 	rxCh      chan string
 	queryRxCh chan string
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
 }
 
 type programRun struct {
@@ -142,6 +148,7 @@ func (c *Controller) Disconnect() error {
 	}
 	c.stopStatusPolling()
 	c.mu.Lock()
+	c.terminateInteractiveSessionLocked(c.interactiveSession, ErrTransportDisconnected)
 	c.suppressNextTransportDisconnected = c.state.Connected
 	c.mu.Unlock()
 	if err := c.transport.Close(); err != nil {
@@ -165,11 +172,6 @@ func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "?" {
 		c.clearPendingQuietStatusReports()
 	}
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
-	}
-
 	line, parseOK := parseConsoleGCodeLine(text)
 	if parseOK {
 		c.mu.RLock()
@@ -183,7 +185,7 @@ func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 			}
 			runtime := c.runtimeForSession(session)
 			err = c.executeApplicationCommand(ctx, runtime, line, engine)
-			c.endInteractiveSession(session)
+			c.endInteractiveSession(session, err)
 			if err != nil {
 				c.emitError(err)
 				return err
@@ -192,6 +194,9 @@ func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 		}
 	}
 
+	if err := c.rejectManualWriteIfBusy(); err != nil {
+		return err
+	}
 	if err := c.transport.Write(ctx, transport.NewLineMessage(text)); err != nil {
 		c.emitError(err)
 		return err
@@ -199,10 +204,24 @@ func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 	return nil
 }
 
+func (c *Controller) rejectManualWriteIfBusy() error {
+	c.mu.RLock()
+	var err error
+	if c.state.ProgramStatus.IsActive() || c.run != nil {
+		err = ErrProgramActive
+	} else if c.interactiveSession != nil {
+		err = ErrInteractiveCommandActive
+	}
+	c.mu.RUnlock()
+	if err != nil {
+		c.emitError(err)
+	}
+	return err
+}
+
 func (c *Controller) Jog(ctx context.Context, axis string, delta float64, feed float64) error {
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
+	if err := c.rejectManualWriteIfBusy(); err != nil {
+		return err
 	}
 	msg, err := grbl.BuildJog(axis, delta, feed)
 	if err != nil {
@@ -217,9 +236,8 @@ func (c *Controller) Jog(ctx context.Context, axis string, delta float64, feed f
 }
 
 func (c *Controller) JogTo(ctx context.Context, axis string, target float64, feed float64) error {
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
+	if err := c.rejectManualWriteIfBusy(); err != nil {
+		return err
 	}
 	msg, err := grbl.BuildMachineJog(axis, target, feed)
 	if err != nil {
@@ -234,9 +252,8 @@ func (c *Controller) JogTo(ctx context.Context, axis string, target float64, fee
 }
 
 func (c *Controller) StopMotion(ctx context.Context) error {
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
+	if err := c.rejectManualWriteIfBusy(); err != nil {
+		return err
 	}
 	msg, err := grbl.BuildAction(grbl.ActionJogCancel)
 	if err != nil {
@@ -321,9 +338,8 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 }
 
 func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
+	if err := c.rejectManualWriteIfBusy(); err != nil {
+		return err
 	}
 	if action == grbl.ActionStatus {
 		c.clearPendingQuietStatusReports()
@@ -366,6 +382,11 @@ func (c *Controller) LoadProgramFile(path string) error {
 
 func (c *Controller) StartProgram(ctx context.Context) error {
 	c.mu.Lock()
+	if c.interactiveSession != nil {
+		c.mu.Unlock()
+		c.emitError(ErrInteractiveCommandActive)
+		return ErrInteractiveCommandActive
+	}
 	if c.run != nil || c.state.ProgramStatus.IsActive() {
 		c.mu.Unlock()
 		err := errors.New("program is already running")
@@ -396,7 +417,7 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 		rxCh:    make(chan string, 64),
 		cancel:  cancel,
 	}
-	run.session = &responseSession{rxCh: run.rxCh}
+	run.session = newResponseSession(run.rxCh)
 	c.run = run
 	c.state.ProgramStatus = ProgramRunning
 	c.state.ProgramComplete = 0
@@ -560,6 +581,8 @@ func (r *commandRuntime) sendLineAndWaitOK(ctx context.Context, line string, sou
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-r.session.Done():
+			return r.session.Err()
 		case rx := <-r.session.rxCh:
 			status := classifyProgramResponse(rx)
 			switch status {
@@ -605,6 +628,8 @@ func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line s
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-r.session.Done():
+			return nil, r.session.Err()
 		case rx := <-queryCh:
 			switch classifyProgramResponse(rx) {
 			case responseOK:
@@ -692,7 +717,7 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 func (c *Controller) handleTransportDisconnected() {
 	c.stopStatusPolling()
 
-	err := errors.New("transport disconnected")
+	err := ErrTransportDisconnected
 	var cancel context.CancelFunc
 	c.mu.Lock()
 	run := c.run
@@ -705,6 +730,8 @@ func (c *Controller) handleTransportDisconnected() {
 	} else {
 		c.state.LastError = ""
 	}
+	interactive := c.interactiveSession
+	c.terminateInteractiveSessionLocked(interactive, err)
 	changed := c.clearConnectionStateLocked()
 	state := c.state
 	c.mu.Unlock()
@@ -712,10 +739,10 @@ func (c *Controller) handleTransportDisconnected() {
 	if cancel != nil {
 		cancel()
 	}
-	if changed || run != nil {
+	if changed || run != nil || interactive != nil {
 		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: err.Error()}
 	}
-	if run != nil {
+	if run != nil || interactive != nil {
 		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
 	}
 }
@@ -904,10 +931,20 @@ func (c *Controller) consumeExpectedTransportDisconnected() bool {
 }
 
 func (c *Controller) deliverResponseLocked(line string) *programRun {
+	if c.interactiveSession != nil && c.run != nil {
+		c.terminateInteractiveSessionLocked(c.interactiveSession, ErrCommandSessionInvariant)
+		c.run.cancel()
+		c.run = nil
+		c.state.ProgramStatus = ProgramFailed
+		c.state.LastError = ErrCommandSessionInvariant.Error()
+		return nil
+	}
 	if c.interactiveSession != nil {
 		if deliverToSession(c.interactiveSession, line) {
 			return nil
 		}
+		c.terminateInteractiveSessionLocked(c.interactiveSession, ErrResponseBacklogFull)
+		return nil
 	}
 	run := c.run
 	if run == nil {
@@ -920,6 +957,9 @@ func (c *Controller) deliverResponseLocked(line string) *programRun {
 }
 
 func deliverToSession(session *responseSession, line string) bool {
+	if session.ctx != nil && session.ctx.Err() != nil {
+		return true
+	}
 	if session.queryRxCh != nil {
 		select {
 		case session.queryRxCh <- line:

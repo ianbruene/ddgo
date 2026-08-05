@@ -3059,6 +3059,180 @@ func TestControllerConsoleRejectsSecondInteractiveMacroSession(t *testing.T) {
 	}
 }
 
+func TestControllerStartProgramRejectedWhileInteractiveMacroWaitingOK(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	path := writeProgramFile(t, "program.gcode", "G0 X1\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	initial := controller.Snapshot()
+	drainEvents(controller.Events())
+
+	done := make(chan error, 1)
+	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 4") }()
+	waitForWrites(t, fake, 1)
+
+	if err := controller.StartProgram(context.Background()); !errors.Is(err, ErrInteractiveCommandActive) {
+		t.Fatalf("StartProgram() error = %v, want %v", err, ErrInteractiveCommandActive)
+	}
+	events := collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)
+	for _, ev := range events {
+		if ev.Kind == EventStateChanged && strings.Contains(ev.Text, "started program") {
+			t.Fatalf("unexpected program-start event while interactive session active: %+v", ev)
+		}
+	}
+	state := controller.Snapshot()
+	if state.ProgramStatus != initial.ProgramStatus || state.ProgramComplete != initial.ProgramComplete || state.ProgramTotal != initial.ProgramTotal {
+		t.Fatalf("program state changed after rejected start: got %+v want status=%v complete=%d total=%d", state, initial.ProgramStatus, initial.ProgramComplete, initial.ProgramTotal)
+	}
+
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, done); err != nil {
+		t.Fatalf("interactive macro error = %v", err)
+	}
+
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() after interactive completion error = %v", err)
+	}
+	waitForWrites(t, fake, 2)
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerStartProgramRejectedWhileInteractiveMacroQueryActive(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	path := writeProgramFile(t, "program.gcode", "G0 X1\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	done := make(chan error, 1)
+	go func() { done <- controller.SendConsoleLine(context.Background(), "M101 G54Z G55Z 0.1") }()
+	waitForWrites(t, fake, 1)
+	if got := fake.Written()[0].Display; got != "$#" {
+		t.Fatalf("first write = %q, want $#", got)
+	}
+
+	if err := controller.StartProgram(context.Background()); !errors.Is(err, ErrInteractiveCommandActive) {
+		t.Fatalf("StartProgram() error = %v, want %v", err, ErrInteractiveCommandActive)
+	}
+	fake.InjectRX("[G54:0.000,0.000,4.000]")
+	fake.InjectRX("[G55:0.000,0.000,4.000]")
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, done); err != nil {
+		t.Fatalf("interactive macro error = %v", err)
+	}
+}
+
+func TestControllerInteractiveMacroExitsOnUnexpectedDisconnect(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	done := make(chan error, 1)
+	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 4") }()
+	waitForWrites(t, fake, 1)
+	fake.InjectDisconnected()
+	if err := waitForErrorResult(t, done); !errors.Is(err, ErrTransportDisconnected) {
+		t.Fatalf("interactive macro error = %v, want %v", err, ErrTransportDisconnected)
+	}
+	controller.mu.RLock()
+	active := controller.interactiveSession != nil
+	controller.mu.RUnlock()
+	if active {
+		t.Fatal("interactiveSession still active after unexpected disconnect")
+	}
+	if got := controller.Snapshot().ProgramStatus; got != ProgramNotLoaded {
+		t.Fatalf("ProgramStatus = %v, want %v", got, ProgramNotLoaded)
+	}
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Reconnect() error = %v", err)
+	}
+	later := make(chan error, 1)
+	go func() { later <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 5") }()
+	waitForWrites(t, fake, 2)
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, later); err != nil {
+		t.Fatalf("later macro error = %v", err)
+	}
+}
+
+func TestControllerExplicitDisconnectTerminatesInteractiveMacro(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- controller.SendConsoleLine(context.Background(), "M101 G54Z G55Z 0.1") }()
+	waitForWrites(t, fake, 1)
+	if err := controller.Disconnect(); err != nil {
+		t.Fatalf("Disconnect() error = %v", err)
+	}
+	if err := waitForErrorResult(t, done); !errors.Is(err, ErrTransportDisconnected) {
+		t.Fatalf("interactive macro error = %v, want %v", err, ErrTransportDisconnected)
+	}
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Reconnect() error = %v", err)
+	}
+	if err := controller.SendConsoleLine(context.Background(), "G0 X1"); err != nil {
+		t.Fatalf("SendConsoleLine() after explicit disconnect/reconnect error = %v", err)
+	}
+}
+
+func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, nil)
+	controller.statusPollInterval = time.Hour
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	drainEvents(controller.Events())
+
+	done := make(chan error, 1)
+	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 4") }()
+	waitForWrites(t, fake, 1)
+	before := len(fake.Written())
+	for _, cmd := range []string{"G0 X9", "M103", "M999", "$I", "?", "M107.1"} {
+		if err := controller.SendConsoleLine(context.Background(), cmd); !errors.Is(err, ErrInteractiveCommandActive) {
+			t.Fatalf("SendConsoleLine(%q) error = %v, want %v", cmd, err, ErrInteractiveCommandActive)
+		}
+	}
+	if err := controller.Jog(context.Background(), "X", 1, 100); !errors.Is(err, ErrInteractiveCommandActive) {
+		t.Fatalf("Jog() error = %v, want %v", err, ErrInteractiveCommandActive)
+	}
+	if err := controller.Action(context.Background(), grbl.ActionStatus); !errors.Is(err, ErrInteractiveCommandActive) {
+		t.Fatalf("Action(status) error = %v, want %v", err, ErrInteractiveCommandActive)
+	}
+	ensureWritesStayAt(t, fake, before, noExtraLifecycleEventWindow)
+	fake.InjectRX("ok")
+	if err := waitForErrorResult(t, done); err != nil {
+		t.Fatalf("interactive macro error = %v", err)
+	}
+	for _, cmd := range []string{"M103", "G0 X9", "$I", "?"} {
+		if err := controller.SendConsoleLine(context.Background(), cmd); err != nil {
+			t.Fatalf("SendConsoleLine(%q) after macro error = %v", cmd, err)
+		}
+	}
+	waitForWrites(t, fake, before+4)
+}
+
 func waitForErrorResult(t *testing.T, ch <-chan error) error {
 	t.Helper()
 	select {
