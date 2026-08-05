@@ -170,7 +170,8 @@ Registered handlers can use the current runtime to:
 - The default macro engine registers exactly `M100`, `M101`, `M102`, `M106`, `M107`, `M108`, `M109`, `M111`, and `M112`.
 - `M103`, `M104`, and `M105` are intentionally undefined; there are no missing commands implied by those numbers.
 - `M110` is unsupported legacy functionality and is rejected locally from both loaded programs and the command prompt.
-- Application macros are handled by DDGo, not firmware; unregistered M-codes and ordinary G-code pass through unchanged.
+- Application macros are handled by DDGo, not firmware. Unregistered M-codes, prefix/dotted forms, firmware commands, manual `?`, and ordinary G-code pass through unchanged only when no response-owning program or interactive macro session is active; while an interactive macro is waiting for controller responses, additional manual submissions are rejected as busy to prevent response misattribution.
+- Loaded programs and interactive command-prompt macros share the same dispatcher, parser, macro engine, registry, handlers, variable store, contour state, WCS helpers, probe parsing, and M110 rejection policy. Interactive macro errors omit file line numbers, while program macro errors keep their source line context.
 - WCS-axis references currently support documented offset registers `G54` through `G59` and axes `X`, `Y`, and `Z`.
 - Variables use the conservative grammar `[A-Za-z_][A-Za-z0-9_]*`.
 - Contour surface fitting, contour motion rewriting, and Z compensation are not active project requirements unless separately reintroduced later.

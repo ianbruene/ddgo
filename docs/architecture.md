@@ -43,6 +43,9 @@ Normal program sending only waits on terminal controller responses. Intermediate
 
 DDGo has query-scoped response collection for macro/runtime queries owned by a response session. Program runs own a program execution session, and an interactive macro owns one short-lived interactive command session:
 
+- At most one response-owning command session may exist: a program run, an interactive macro, or neither. Program start is rejected while an interactive macro is active, and interactive macros/manual controls are rejected while a program is active.
+- Manual command-prompt submissions and manual transport actions that could produce controller responses are rejected while an interactive macro owns responses. Automatic status polling remains allowed because it uses suppressed requests and status parsing that cannot complete an application command.
+- Explicit and unexpected disconnects synchronously terminate an active interactive macro session with the transport-disconnected sentinel, clear ownership, and wake response waiters without failing an idle loaded program or clearing variables/contour points.
 - Normal program execution does not buffer every RX line.
 - When a macro/runtime query is active, the active run temporarily installs a query response channel.
 - All RX lines delivered to the active run are also delivered to that query channel until the query completes.

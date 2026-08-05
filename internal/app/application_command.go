@@ -68,16 +68,48 @@ func (c *Controller) beginInteractiveSession() (*responseSession, error) {
 	if c.interactiveSession != nil {
 		return nil, ErrInteractiveCommandActive
 	}
-	session := &responseSession{rxCh: make(chan string, 64)}
+	session := newResponseSession(make(chan string, 64))
 	c.interactiveSession = session
 	return session, nil
 }
 
-func (c *Controller) endInteractiveSession(session *responseSession) {
-	c.mu.Lock()
-	if c.interactiveSession == session {
-		c.interactiveSession = nil
+func newResponseSession(rxCh chan string) *responseSession {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	return &responseSession{rxCh: rxCh, ctx: ctx, cancel: cancel}
+}
+
+func (s *responseSession) Done() <-chan struct{} {
+	if s == nil || s.ctx == nil {
+		return nil
 	}
+	return s.ctx.Done()
+}
+
+func (s *responseSession) Err() error {
+	if s == nil || s.ctx == nil {
+		return nil
+	}
+	if cause := context.Cause(s.ctx); cause != nil {
+		return cause
+	}
+	return s.ctx.Err()
+}
+
+func (c *Controller) terminateInteractiveSessionLocked(session *responseSession, cause error) bool {
+	if session == nil || c.interactiveSession != session {
+		return false
+	}
+	c.interactiveSession = nil
+	if cause == nil {
+		cause = ErrCommandSessionCanceled
+	}
+	session.cancel(cause)
+	return true
+}
+
+func (c *Controller) endInteractiveSession(session *responseSession, cause error) {
+	c.mu.Lock()
+	c.terminateInteractiveSessionLocked(session, cause)
 	c.mu.Unlock()
 }
 
@@ -133,7 +165,8 @@ func (r *commandRuntime) Contour() *macro.ContourState    { return r.controller.
 
 func (run *programRun) responseSession() *responseSession {
 	if run.session == nil {
-		run.session = &responseSession{rxCh: run.rxCh, queryRxCh: run.queryRxCh}
+		run.session = newResponseSession(run.rxCh)
+		run.session.queryRxCh = run.queryRxCh
 	}
 	if run.session.rxCh == nil {
 		run.session.rxCh = run.rxCh
