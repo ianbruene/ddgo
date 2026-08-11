@@ -70,11 +70,47 @@ func (c *Controller) beginInteractiveSession() (*responseSession, error) {
 }
 
 func (c *Controller) acquireResponseOwnerLocked(kind responseOwnerKind, session *responseSession) error {
-	if err := c.responseOwnerBusyErrorLocked(kind); err != nil {
+	request := admissionManual
+	if kind == responseOwnerProgram {
+		request = admissionProgram
+	} else if kind == responseOwnerInteractiveMacro {
+		request = admissionInteractive
+	}
+	if err := c.admissionErrorLocked(request); err != nil {
 		return err
 	}
 	c.responseOwner = responseOwner{kind: kind, session: session}
 	return nil
+}
+
+// admissionErrorLocked is the single admission policy for lifecycle changes,
+// response-owning commands, and realtime operations. c.mu must be held.
+func (c *Controller) admissionErrorLocked(request admissionKind) error {
+	if c.connectionTransition != connectionStable {
+		return ErrConnectionTransition
+	}
+	if request == admissionConnect {
+		if c.state.Connected {
+			return ErrAlreadyConnected
+		}
+		return c.responseOwnerBusyErrorLocked(responseOwnerProgram)
+	}
+	if request == admissionDisconnect {
+		if c.run != nil || c.state.ProgramStatus.IsActive() {
+			return ErrProgramActive
+		}
+		return nil
+	}
+	if request == admissionRealtime {
+		return nil
+	}
+	requested := responseOwnerManualLine
+	if request == admissionProgram {
+		requested = responseOwnerProgram
+	} else if request == admissionInteractive {
+		requested = responseOwnerInteractiveMacro
+	}
+	return c.responseOwnerBusyErrorLocked(requested)
 }
 
 func (c *Controller) responseOwnerBusyErrorLocked(requested responseOwnerKind) error {

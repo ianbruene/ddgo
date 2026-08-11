@@ -23,6 +23,8 @@ var ErrCommandSessionCanceled = errors.New("command session canceled")
 var ErrControllerReset = errors.New("controller reset")
 var ErrResponseBacklogFull = errors.New("response backlog full")
 var ErrCommandSessionInvariant = errors.New("controller command session invariant violated")
+var ErrConnectionTransition = errors.New("connection transition in progress")
+var ErrAlreadyConnected = errors.New("controller is already connected")
 
 const defaultStatusPollInterval = 500 * time.Millisecond
 
@@ -47,6 +49,25 @@ type responseOwner struct {
 	session *responseSession
 }
 
+type connectionTransition uint8
+
+const (
+	connectionStable connectionTransition = iota
+	connectionConnecting
+	connectionDisconnecting
+)
+
+type admissionKind uint8
+
+const (
+	admissionProgram admissionKind = iota
+	admissionInteractive
+	admissionManual
+	admissionRealtime
+	admissionConnect
+	admissionDisconnect
+)
+
 type programRun struct {
 	program   gcode.Program
 	session   *responseSession
@@ -64,6 +85,7 @@ type Controller struct {
 	loaded                            gcode.Program
 	run                               *programRun
 	responseOwner                     responseOwner
+	connectionTransition              connectionTransition
 	statusPollCancel                  context.CancelFunc
 	statusPollDone                    chan struct{}
 	statusPollInterval                time.Duration
@@ -136,13 +158,17 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		return err
 	}
 	c.mu.Lock()
-	if err := c.responseOwnerBusyErrorLocked(responseOwnerProgram); err != nil {
+	if err := c.admissionErrorLocked(admissionConnect); err != nil {
 		c.mu.Unlock()
 		c.emitError(err)
 		return err
 	}
+	c.connectionTransition = connectionConnecting
 	c.mu.Unlock()
 	if err := c.transport.Open(ctx, cfg); err != nil {
+		c.mu.Lock()
+		c.connectionTransition = connectionStable
+		c.mu.Unlock()
 		c.emitError(err)
 		return err
 	}
@@ -151,6 +177,7 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 	c.state.Connected = true
 	c.state.PortName = cfg.Name
 	c.state.LastError = ""
+	c.connectionTransition = connectionStable
 	state := c.state
 	c.startStatusPollingLocked()
 	c.mu.Unlock()
@@ -160,18 +187,21 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 }
 
 func (c *Controller) Disconnect() error {
-	if c.Snapshot().ProgramStatus.IsActive() {
-		c.emitError(ErrProgramActive)
-		return ErrProgramActive
-	}
-	c.stopStatusPolling()
 	c.mu.Lock()
+	if err := c.admissionErrorLocked(admissionDisconnect); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
+	c.connectionTransition = connectionDisconnecting
 	c.terminateResponseOwnerLocked(c.responseOwner, ErrTransportDisconnected)
 	c.suppressNextTransportDisconnected = c.state.Connected
 	c.mu.Unlock()
+	c.stopStatusPolling()
 	if err := c.transport.Close(); err != nil {
 		c.mu.Lock()
 		c.suppressNextTransportDisconnected = false
+		c.connectionTransition = connectionStable
 		c.mu.Unlock()
 		c.emitError(err)
 		return err
@@ -179,6 +209,7 @@ func (c *Controller) Disconnect() error {
 
 	c.mu.Lock()
 	c.clearConnectionStateLocked()
+	c.connectionTransition = connectionStable
 	state := c.state
 	c.mu.Unlock()
 
@@ -188,6 +219,13 @@ func (c *Controller) Disconnect() error {
 
 func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "?" {
+		c.mu.Lock()
+		err := c.admissionErrorLocked(admissionRealtime)
+		c.mu.Unlock()
+		if err != nil {
+			c.emitError(err)
+			return err
+		}
 		c.clearPendingQuietStatusReports()
 		msg, err := grbl.BuildAction(grbl.ActionStatus)
 		if err != nil {
@@ -250,10 +288,7 @@ func (c *Controller) writeManualResponseMessage(ctx context.Context, msg transpo
 
 func (c *Controller) rejectManualWriteIfBusy() error {
 	c.mu.RLock()
-	var err error
-	if c.responseOwner.kind != responseOwnerNone {
-		err = c.responseOwnerBusyErrorLocked(responseOwnerManualLine)
-	}
+	err := c.admissionErrorLocked(admissionManual)
 	c.mu.RUnlock()
 	if err != nil {
 		c.emitError(err)
@@ -287,8 +322,13 @@ func (c *Controller) JogTo(ctx context.Context, axis string, target float64, fee
 
 func (c *Controller) StopMotion(ctx context.Context) error {
 	c.mu.RLock()
+	transitionErr := c.admissionErrorLocked(admissionRealtime)
 	programActive := c.state.ProgramStatus.IsActive() || c.run != nil
 	c.mu.RUnlock()
+	if transitionErr != nil {
+		c.emitError(transitionErr)
+		return transitionErr
+	}
 	if programActive {
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
@@ -379,6 +419,13 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 }
 
 func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
+	c.mu.Lock()
+	if err := c.admissionErrorLocked(admissionRealtime); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
+	c.mu.Unlock()
 	if action == grbl.ActionStatus {
 		c.mu.RLock()
 		programActive := c.state.ProgramStatus.IsActive() || c.run != nil
@@ -478,14 +525,18 @@ func (c *Controller) LoadProgramFile(path string) error {
 
 func (c *Controller) StartProgram(ctx context.Context) error {
 	c.mu.Lock()
+	if err := c.admissionErrorLocked(admissionRealtime); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
 	if c.run != nil || c.state.ProgramStatus.IsActive() {
 		c.mu.Unlock()
 		err := errors.New("program is already running")
 		c.emitError(err)
 		return err
 	}
-	if c.responseOwner.kind != responseOwnerNone {
-		err := c.responseOwnerBusyErrorLocked(responseOwnerProgram)
+	if err := c.admissionErrorLocked(admissionProgram); err != nil {
 		c.mu.Unlock()
 		c.emitError(err)
 		return err
