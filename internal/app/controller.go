@@ -20,6 +20,7 @@ var ErrProgramQueryActive = errors.New("program query is already active")
 var ErrInteractiveCommandActive = errors.New("interactive command is already active")
 var ErrTransportDisconnected = errors.New("transport disconnected")
 var ErrCommandSessionCanceled = errors.New("command session canceled")
+var ErrControllerReset = errors.New("controller reset")
 var ErrResponseBacklogFull = errors.New("response backlog full")
 var ErrCommandSessionInvariant = errors.New("controller command session invariant violated")
 
@@ -393,6 +394,22 @@ func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
 		c.emitError(err)
 		return err
 	}
+	if action == grbl.ActionSoftReset {
+		c.mu.Lock()
+		err = c.prepareSoftResetLocked()
+		c.mu.Unlock()
+		if err != nil {
+			c.emitError(err)
+			return err
+		}
+		// Cancellation deliberately precedes the write: reset RX must never be
+		// routed to the command session whose controller state it invalidates.
+		if err := c.transport.Write(ctx, msg); err != nil {
+			c.emitError(err)
+			return err
+		}
+		return nil
+	}
 	if actionProducesTerminalResponse(action) {
 		return c.writeManualResponseMessage(ctx, msg)
 	}
@@ -403,11 +420,29 @@ func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
 	return nil
 }
 
+// prepareSoftResetLocked cancels command ownership invalidated by a GRBL reset.
+// Programs are excluded: StopProgram owns their cancellation and its established
+// Hold/Soft Reset lifecycle, so Action must not create a competing stop path.
+func (c *Controller) prepareSoftResetLocked() error {
+	owner := c.responseOwner
+	switch owner.kind {
+	case responseOwnerNone:
+		return nil
+	case responseOwnerManualLine, responseOwnerInteractiveMacro:
+		c.terminateResponseOwnerLocked(owner, ErrControllerReset)
+		return nil
+	case responseOwnerProgram:
+		return ErrProgramActive
+	default:
+		return ErrCommandSessionInvariant
+	}
+}
+
 // actionProducesTerminalResponse documents GRBL command ownership for UI/manual actions.
 // Unlock ($X) and home ($H) are line commands that end in ok/error/alarm, so they
 // reserve manual response ownership. Status (?) and realtime controls (!, ~, Ctrl-X,
-// jog-cancel) do not emit terminal ok responses; they are allowed as protocol-level
-// realtime exceptions and must not complete or release the current owner.
+// jog-cancel) do not emit terminal ok responses. Soft Reset is handled separately
+// because, unlike the other realtime controls, it cancels controller command state.
 func actionProducesTerminalResponse(action grbl.Action) bool {
 	switch action {
 	case grbl.ActionUnlock, grbl.ActionHome:
