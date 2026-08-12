@@ -27,48 +27,54 @@ type Window struct {
 	commandEntry *qt.QLineEdit
 	sendButton   *qt.QPushButton
 
-	portCombo        *qt.QComboBox
-	refreshButton    *qt.QPushButton
-	connectButton    *qt.QPushButton
-	programPath      *qt.QLineEdit
-	browseButton     *qt.QPushButton
-	runButton        *qt.QPushButton
-	pauseButton      *qt.QPushButton
-	resumeButton     *qt.QPushButton
-	stopButton       *qt.QPushButton
-	stepCombo        *qt.QComboBox
-	feedCombo        *qt.QComboBox
-	xTravel          *qt.QLineEdit
-	yTravel          *qt.QLineEdit
-	zTravel          *qt.QLineEdit
-	jogXPButton      *qt.QPushButton
-	jogXMButton      *qt.QPushButton
-	jogYPButton      *qt.QPushButton
-	jogYMButton      *qt.QPushButton
-	jogZPButton      *qt.QPushButton
-	jogZMButton      *qt.QPushButton
-	jogToXPButton    *qt.QPushButton
-	jogToXMButton    *qt.QPushButton
-	jogToYPButton    *qt.QPushButton
-	jogToYMButton    *qt.QPushButton
-	jogToZPButton    *qt.QPushButton
-	jogToZMButton    *qt.QPushButton
-	stopMotionButton *qt.QPushButton
-	unlockButton     *qt.QPushButton
-	homeButton       *qt.QPushButton
-	resetButton      *qt.QPushButton
-	holdButton       *qt.QPushButton
-	resumeActBtn     *qt.QPushButton
-	statusButton     *qt.QPushButton
-	connStatus       *qt.QLabel
-	machineStatus    *qt.QLabel
-	machinePos       *qt.QLabel
-	workPos          *qt.QLabel
-	feedSpindle      *qt.QLabel
-	programStatus    *qt.QLabel
-	programProgress  *qt.QLabel
-	lastErrorLabel   *qt.QLabel
-	pollTimer        *qt.QTimer
+	portCombo         *qt.QComboBox
+	refreshButton     *qt.QPushButton
+	connectButton     *qt.QPushButton
+	programPath       *qt.QLineEdit
+	browseButton      *qt.QPushButton
+	runButton         *qt.QPushButton
+	pauseButton       *qt.QPushButton
+	resumeButton      *qt.QPushButton
+	stopButton        *qt.QPushButton
+	stepCombo         *qt.QComboBox
+	feedCombo         *qt.QComboBox
+	xTravel           *qt.QLineEdit
+	yTravel           *qt.QLineEdit
+	zTravel           *qt.QLineEdit
+	jogXPButton       *qt.QPushButton
+	jogXMButton       *qt.QPushButton
+	jogYPButton       *qt.QPushButton
+	jogYMButton       *qt.QPushButton
+	jogZPButton       *qt.QPushButton
+	jogZMButton       *qt.QPushButton
+	jogToXPButton     *qt.QPushButton
+	jogToXMButton     *qt.QPushButton
+	jogToYPButton     *qt.QPushButton
+	jogToYMButton     *qt.QPushButton
+	jogToZPButton     *qt.QPushButton
+	jogToZMButton     *qt.QPushButton
+	stopMotionButton  *qt.QPushButton
+	unlockButton      *qt.QPushButton
+	homeButton        *qt.QPushButton
+	resetButton       *qt.QPushButton
+	holdButton        *qt.QPushButton
+	resumeActBtn      *qt.QPushButton
+	statusButton      *qt.QPushButton
+	connStatus        *qt.QLabel
+	machineStatus     *qt.QLabel
+	machinePos        *qt.QLabel
+	workPos           *qt.QLabel
+	feedSpindle       *qt.QLabel
+	spindleRPM        *qt.QSpinBox
+	spindleCWButton   *qt.QPushButton
+	spindleCCWButton  *qt.QPushButton
+	spindleSetButton  *qt.QPushButton
+	spindleStopButton *qt.QPushButton
+	spindleReported   *qt.QLabel
+	programStatus     *qt.QLabel
+	programProgress   *qt.QLabel
+	lastErrorLabel    *qt.QLabel
+	pollTimer         *qt.QTimer
 }
 
 func Run(controller *app.Controller) error {
@@ -311,6 +317,27 @@ func (w *Window) build() {
 	for _, lbl := range []*qt.QLabel{w.connStatus, w.machineStatus, w.machinePos, w.workPos, w.feedSpindle, w.programStatus, w.programProgress, w.lastErrorLabel} {
 		statusGroup.Layout().AddWidget(lbl.QWidget)
 	}
+
+	spindleGroup := groupBox("Spindle")
+	rightLayout.AddWidget(spindleGroup.QWidget)
+	w.spindleRPM = qt.NewQSpinBox(nil)
+	w.spindleRPM.SetRange(grbl.MinSpindleRPM, grbl.MaxSpindleRPM)
+	w.spindleRPM.SetValue(5000)
+	w.spindleRPM.SetSuffix(" RPM")
+	spindleGroup.Layout().AddWidget(w.spindleRPM.QWidget)
+	spindleStartRow := qt.NewQWidget(nil)
+	spindleStartRow.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
+	spindleGroup.Layout().AddWidget(spindleStartRow)
+	w.spindleCWButton = button("Start CW")
+	w.spindleCCWButton = button("Start CCW")
+	spindleStartRow.Layout().AddWidget(w.spindleCWButton.QWidget)
+	spindleStartRow.Layout().AddWidget(w.spindleCCWButton.QWidget)
+	w.spindleSetButton = button("Set Speed")
+	w.spindleStopButton = button("Stop")
+	spindleGroup.Layout().AddWidget(w.spindleSetButton.QWidget)
+	spindleGroup.Layout().AddWidget(w.spindleStopButton.QWidget)
+	w.spindleReported = qt.NewQLabel(nil)
+	spindleGroup.Layout().AddWidget(w.spindleReported.QWidget)
 	rightLayout.AddStretch()
 
 	w.pollTimer = qt.NewQTimer()
@@ -349,6 +376,16 @@ func (w *Window) bind() {
 	w.holdButton.OnClicked(func() { w.action(grbl.ActionHold) })
 	w.resumeActBtn.OnClicked(func() { w.action(grbl.ActionResume) })
 	w.statusButton.OnClicked(func() { w.action(grbl.ActionStatus) })
+	w.spindleCWButton.OnClicked(func() {
+		go func() { _ = w.controller.StartSpindleCW(context.Background(), float64(w.spindleRPM.Value())) }()
+	})
+	w.spindleCCWButton.OnClicked(func() {
+		go func() { _ = w.controller.StartSpindleCCW(context.Background(), float64(w.spindleRPM.Value())) }()
+	})
+	w.spindleSetButton.OnClicked(func() {
+		go func() { _ = w.controller.SetSpindleSpeed(context.Background(), float64(w.spindleRPM.Value())) }()
+	})
+	w.spindleStopButton.OnClicked(func() { go func() { _ = w.controller.StopSpindle(context.Background()) }() })
 }
 
 func (w *Window) toggleConnection() {
@@ -546,8 +583,10 @@ func (w *Window) applyState(state app.State) {
 	}
 	if state.HasFeedSpindle {
 		w.feedSpindle.SetText(fmt.Sprintf("Feed: %.0f  Spindle: %.0f", state.Feed, state.Spindle))
+		w.spindleReported.SetText(fmt.Sprintf("Reported RPM: %.0f", state.Spindle))
 	} else {
 		w.feedSpindle.SetText("Feed: unknown  Spindle: unknown")
+		w.spindleReported.SetText("Reported RPM: unknown")
 	}
 	if state.ProgramPath != "" && strings.TrimSpace(w.programPath.Text()) == "" {
 		w.programPath.SetText(state.ProgramPath)
@@ -591,6 +630,10 @@ func (w *Window) applyState(state app.State) {
 		btn.SetEnabled(canJogToEnd)
 	}
 	w.stopMotionButton.SetEnabled(canManual)
+	w.spindleRPM.SetEnabled(canManual)
+	for _, btn := range []*qt.QPushButton{w.spindleCWButton, w.spindleCCWButton, w.spindleSetButton, w.spindleStopButton} {
+		btn.SetEnabled(canManual)
+	}
 }
 
 func (w *Window) appendConsole(prefix string, text string) {

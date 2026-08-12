@@ -55,6 +55,23 @@ func TestStatusReportIncludesWCOAndFS(t *testing.T) {
 	}
 }
 
+func TestSpindleCommandsUpdateStatusRPM(t *testing.T) {
+	fw := DefaultFirmwareProfile()
+	fw.StatusFSEnabled = true
+	c := NewController(fw, DefaultMachineProfile(), &ManualClock{T: time.Unix(0, 0)})
+	steps := []struct{ command, want string }{
+		{"S5000 M3\n?", "|FS:0,5000|"},
+		{"S6000\n?", "|FS:0,6000|"},
+		{"M5\n?", "|FS:0,0|"},
+		{"S5000 M4\n?", "|FS:0,5000|"},
+	}
+	for _, step := range steps {
+		if got := joined(c.ProcessBytes([]byte(step.command))); !strings.Contains(got, step.want) {
+			t.Fatalf("%q response = %q, want %q", step.command, got, step.want)
+		}
+	}
+}
+
 func TestStartupBlankNormalize(t *testing.T) {
 	c, _ := testCtl()
 	if got := joined(c.Connect()); got != "\r\nGrbl 1.1g [help:'$']\r\n" {

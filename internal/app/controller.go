@@ -373,6 +373,34 @@ func (c *Controller) JogTo(ctx context.Context, axis string, target float64, fee
 	return c.writeManualResponseMessage(ctx, msg)
 }
 
+func (c *Controller) StartSpindleCW(ctx context.Context, rpm float64) error {
+	return c.writeSpindleCommand(ctx, func() (transport.Message, error) { return grbl.BuildSpindleStartCW(rpm) })
+}
+
+func (c *Controller) StartSpindleCCW(ctx context.Context, rpm float64) error {
+	return c.writeSpindleCommand(ctx, func() (transport.Message, error) { return grbl.BuildSpindleStartCCW(rpm) })
+}
+
+func (c *Controller) SetSpindleSpeed(ctx context.Context, rpm float64) error {
+	return c.writeSpindleCommand(ctx, func() (transport.Message, error) { return grbl.BuildSpindleSpeed(rpm) })
+}
+
+func (c *Controller) StopSpindle(ctx context.Context) error {
+	return c.writeSpindleCommand(ctx, func() (transport.Message, error) { return grbl.BuildSpindleStop(), nil })
+}
+
+func (c *Controller) writeSpindleCommand(ctx context.Context, build func() (transport.Message, error)) error {
+	if err := c.rejectManualWriteIfBusy(); err != nil {
+		return err
+	}
+	msg, err := build()
+	if err != nil {
+		c.emitError(err)
+		return err
+	}
+	return c.writeManualResponseMessage(ctx, msg)
+}
+
 func (c *Controller) StopMotion(ctx context.Context) error {
 	c.mu.Lock()
 	programActive := c.state.ProgramStatus.IsActive() || c.run != nil

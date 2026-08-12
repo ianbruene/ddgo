@@ -31,6 +31,10 @@ type Controller struct {
 	events                     []LogEntry
 	lastCmd, lastResp, lastErr string
 	rxOverflow                 bool
+	spindleRPM                 float64
+	spindleRunning             bool
+	spindleStatusRPM           float64
+	spindleStatusSet           bool
 }
 
 func NewController(fw FirmwareProfile, mach MachineProfile, clock Clock) *Controller {
@@ -206,6 +210,24 @@ func (c *Controller) handleLine(raw string) []string {
 	if strings.HasPrefix(norm, "G38.2") {
 		return c.handleProbe(norm)
 	}
+	if ok, rpm, start := parseSpindleCommand(norm); ok {
+		if rpm != nil {
+			c.spindleRPM = *rpm
+			if c.spindleRunning || start == 1 || start == -1 {
+				c.spindleStatusRPM = *rpm
+				c.spindleStatusSet = true
+			}
+		}
+		switch start {
+		case 1, -1:
+			c.spindleRunning = true
+		case 0:
+			c.spindleRunning = false
+			c.spindleStatusRPM = 0
+			c.spindleStatusSet = true
+		}
+		return c.emit(c.fw.OK())
+	}
 	switch norm {
 	case "$X":
 		c.setState(StateIdle)
@@ -229,6 +251,34 @@ func (c *Controller) handleLine(raw string) []string {
 	default:
 		return c.errorLine(norm, "Unsupported", 20)
 	}
+}
+
+// parseSpindleCommand recognizes the small spindle command surface exercised by DDGo.
+// start is 1/-1 for M3/M4, 0 for M5, and 2 when direction is unchanged.
+func parseSpindleCommand(norm string) (bool, *float64, int) {
+	if norm == "M5" {
+		return true, nil, 0
+	}
+	if !strings.HasPrefix(norm, "S") {
+		return false, nil, 0
+	}
+	body := strings.TrimPrefix(norm, "S")
+	start := 2
+	for _, suffix := range []struct {
+		text  string
+		start int
+	}{{"M3", 1}, {"M4", -1}} {
+		if strings.HasSuffix(body, suffix.text) {
+			body = strings.TrimSuffix(body, suffix.text)
+			start = suffix.start
+			break
+		}
+	}
+	rpm, err := strconv.ParseFloat(body, 64)
+	if err != nil || math.IsNaN(rpm) || math.IsInf(rpm, 0) || rpm < 0 {
+		return false, nil, 0
+	}
+	return true, &rpm, start
 }
 
 func (c *Controller) handleProbe(norm string) []string {
@@ -536,6 +586,9 @@ func (c *Controller) statusLine() string {
 	}
 	if c.fw.StatusFSEnabled {
 		fs := c.fw.StatusFS
+		if c.spindleStatusSet {
+			fs[1] = c.spindleStatusRPM
+		}
 		parts = append(parts, fmt.Sprintf("FS:%.0f,%.0f", fs[0], fs[1]))
 	}
 	parts = append(parts, fmt.Sprintf("B:%d,%d", free, c.freeRXBytesLocked()), "L:0", "0000")
