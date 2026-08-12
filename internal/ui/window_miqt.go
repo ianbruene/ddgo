@@ -377,13 +377,16 @@ func (w *Window) bind() {
 	w.resumeActBtn.OnClicked(func() { w.action(grbl.ActionResume) })
 	w.statusButton.OnClicked(func() { w.action(grbl.ActionStatus) })
 	w.spindleCWButton.OnClicked(func() {
-		go func() { _ = w.controller.StartSpindleCW(context.Background(), float64(w.spindleRPM.Value())) }()
+		rpm := float64(w.spindleRPM.Value())
+		go func() { _ = w.controller.StartSpindleCW(context.Background(), rpm) }()
 	})
 	w.spindleCCWButton.OnClicked(func() {
-		go func() { _ = w.controller.StartSpindleCCW(context.Background(), float64(w.spindleRPM.Value())) }()
+		rpm := float64(w.spindleRPM.Value())
+		go func() { _ = w.controller.StartSpindleCCW(context.Background(), rpm) }()
 	})
 	w.spindleSetButton.OnClicked(func() {
-		go func() { _ = w.controller.SetSpindleSpeed(context.Background(), float64(w.spindleRPM.Value())) }()
+		rpm := float64(w.spindleRPM.Value())
+		go func() { _ = w.controller.SetSpindleSpeed(context.Background(), rpm) }()
 	})
 	w.spindleStopButton.OnClicked(func() { go func() { _ = w.controller.StopSpindle(context.Background()) }() })
 }
