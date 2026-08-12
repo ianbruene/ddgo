@@ -27,6 +27,11 @@ type StatusReport struct {
 type Action string
 
 const (
+	MinSpindleRPM = 1500
+	MaxSpindleRPM = 8000
+)
+
+const (
 	ActionUnlock    Action = "unlock"
 	ActionHome      Action = "home"
 	ActionHold      Action = "hold"
@@ -73,6 +78,35 @@ func BuildMachineJog(axis string, target float64, feed float64) (transport.Messa
 	}
 	line := fmt.Sprintf("$J=G53 G90 %s%.3f F%.0f", axis, target, feed)
 	return transport.NewLineMessage(line), nil
+}
+
+func BuildSpindleStartCW(rpm float64) (transport.Message, error) {
+	return buildSpindleRPMCommand(rpm, " M3")
+}
+
+func BuildSpindleStartCCW(rpm float64) (transport.Message, error) {
+	return buildSpindleRPMCommand(rpm, " M4")
+}
+
+func BuildSpindleSpeed(rpm float64) (transport.Message, error) {
+	return buildSpindleRPMCommand(rpm, "")
+}
+
+func BuildSpindleStop() transport.Message {
+	return transport.NewLineMessage("M5")
+}
+
+func buildSpindleRPMCommand(rpm float64, suffix string) (transport.Message, error) {
+	if math.IsNaN(rpm) || math.IsInf(rpm, 0) {
+		return transport.Message{}, errors.New("spindle RPM must be finite")
+	}
+	if rpm != math.Trunc(rpm) {
+		return transport.Message{}, errors.New("spindle RPM must be an integer")
+	}
+	if rpm < MinSpindleRPM || rpm > MaxSpindleRPM {
+		return transport.Message{}, fmt.Errorf("spindle RPM must be between %d and %d", MinSpindleRPM, MaxSpindleRPM)
+	}
+	return transport.NewLineMessage(fmt.Sprintf("S%.0f%s", rpm, suffix)), nil
 }
 
 func BuildAction(action Action) (transport.Message, error) {
