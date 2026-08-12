@@ -89,6 +89,17 @@ func (c *Controller) admissionErrorLocked(request admissionKind) error {
 	if c.connectionTransition != connectionStable {
 		return ErrConnectionTransition
 	}
+	if c.realtimeWriteActive {
+		// Disconnect first claims its transition and then drains the admitted
+		// write; every other admission must wait for the reservation to end.
+		if request == admissionDisconnect {
+			if c.run != nil || c.state.ProgramStatus.IsActive() {
+				return ErrProgramActive
+			}
+			return nil
+		}
+		return ErrControllerIOActive
+	}
 	if request == admissionConnect {
 		if c.state.Connected {
 			return ErrAlreadyConnected

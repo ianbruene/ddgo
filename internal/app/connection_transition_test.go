@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -12,15 +13,20 @@ import (
 )
 
 type blockingOpenTransport struct {
-	events      chan transport.Event
-	openStarted chan struct{}
-	releaseOpen chan struct{}
-	startOnce   sync.Once
-	mu          sync.Mutex
-	openCalls   int
-	closeCalls  int
-	writes      []transport.Message
-	openErr     error
+	events       chan transport.Event
+	openStarted  chan struct{}
+	releaseOpen  chan struct{}
+	startOnce    sync.Once
+	mu           sync.Mutex
+	openCalls    int
+	closeCalls   int
+	writes       []transport.Message
+	openErr      error
+	writeStarted chan struct{}
+	releaseWrite chan struct{}
+	blockWrites  bool
+	writeOnce    sync.Once
+	writeErr     error
 }
 
 func newBlockingOpenTransport() *blockingOpenTransport {
@@ -51,9 +57,149 @@ func (t *blockingOpenTransport) Close() error {
 }
 func (t *blockingOpenTransport) Write(_ context.Context, msg transport.Message) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.writes = append(t.writes, msg)
-	return nil
+	block := t.blockWrites
+	err := t.writeErr
+	t.mu.Unlock()
+	if block {
+		t.writeOnce.Do(func() { close(t.writeStarted) })
+		<-t.releaseWrite
+	}
+	return err
+}
+
+func TestConnectAttemptInvalidatedByDisconnectBeforeCommit(t *testing.T) {
+	tr := newBlockingOpenTransport()
+	c := NewController(tr, nil)
+	c.statusPollInterval = time.Hour
+	done := beginBlockedConnect(t, tr, c, context.Background())
+
+	tr.events <- transport.Event{Kind: transport.EventDisconnected, When: time.Now()}
+	for {
+		c.mu.RLock()
+		invalidated := errors.Is(c.connectAttemptErr, ErrTransportDisconnected)
+		c.mu.RUnlock()
+		if invalidated {
+			break
+		}
+		runtime.Gosched()
+	}
+	close(tr.releaseOpen)
+	if err := <-done; !errors.Is(err, ErrTransportDisconnected) {
+		t.Fatalf("Connect() error = %v, want ErrTransportDisconnected", err)
+	}
+	if state := c.Snapshot(); state.Connected {
+		t.Fatal("Connect committed an invalidated attempt")
+	}
+	c.mu.RLock()
+	transition, attempt, poll := c.connectionTransition, c.activeConnectAttempt, c.statusPollCancel
+	c.mu.RUnlock()
+	if transition != connectionStable || attempt != 0 || poll != nil {
+		t.Fatalf("cleanup = transition %v attempt %v poll %v", transition, attempt, poll != nil)
+	}
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig("retry")); err != nil {
+		t.Fatalf("retry Connect() error = %v", err)
+	}
+}
+
+func TestRealtimeWriteReservationBlocksConnect(t *testing.T) {
+	tr := newBlockingOpenTransport()
+	tr.blockWrites = true
+	tr.writeStarted = make(chan struct{})
+	tr.releaseWrite = make(chan struct{})
+	c := NewController(tr, nil)
+
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- c.Action(context.Background(), grbl.ActionHold) }()
+	<-tr.writeStarted
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig("blocked")); !errors.Is(err, ErrControllerIOActive) {
+		t.Fatalf("Connect() error = %v, want ErrControllerIOActive", err)
+	}
+	if opens, _, _ := tr.counts(); opens != 0 {
+		t.Fatalf("Open calls = %d, want 0", opens)
+	}
+	close(tr.releaseWrite)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("Action() error = %v", err)
+	}
+	close(tr.releaseOpen)
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig("retry")); err != nil {
+		t.Fatalf("retry Connect() error = %v", err)
+	}
+}
+
+func TestSoftResetReservationBlocksReplacementOwner(t *testing.T) {
+	tr := newBlockingOpenTransport()
+	tr.blockWrites = true
+	tr.writeStarted = make(chan struct{})
+	tr.releaseWrite = make(chan struct{})
+	c := NewController(tr, nil)
+	ownerA := newResponseSession(make(chan string, 1))
+	c.mu.Lock()
+	if err := c.acquireResponseOwnerLocked(responseOwnerManualLine, ownerA); err != nil {
+		c.mu.Unlock()
+		t.Fatal(err)
+	}
+	c.mu.Unlock()
+
+	resetDone := make(chan error, 1)
+	go func() { resetDone <- c.Action(context.Background(), grbl.ActionSoftReset) }()
+	<-tr.writeStarted
+	if !errors.Is(ownerA.Err(), ErrControllerReset) {
+		t.Fatalf("interrupted owner error = %v, want ErrControllerReset", ownerA.Err())
+	}
+	if _, err := c.beginInteractiveSession(); !errors.Is(err, ErrControllerIOActive) {
+		t.Fatalf("replacement owner error = %v, want ErrControllerIOActive", err)
+	}
+	close(tr.releaseWrite)
+	if err := <-resetDone; err != nil {
+		t.Fatalf("Soft Reset error = %v", err)
+	}
+	if session, err := c.beginInteractiveSession(); err != nil {
+		t.Fatalf("replacement after reset error = %v", err)
+	} else {
+		c.endInteractiveSession(session, nil)
+	}
+}
+
+func TestDisconnectWaitsForRealtimeWrite(t *testing.T) {
+	tr := newBlockingOpenTransport()
+	c := NewController(tr, nil)
+	c.statusPollInterval = time.Hour
+	close(tr.releaseOpen)
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig("connected")); err != nil {
+		t.Fatal(err)
+	}
+	tr.blockWrites = true
+	tr.writeStarted = make(chan struct{})
+	tr.releaseWrite = make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- c.Action(context.Background(), grbl.ActionHold) }()
+	<-tr.writeStarted
+	disconnectDone := make(chan error, 1)
+	go func() { disconnectDone <- c.Disconnect() }()
+	for {
+		c.mu.RLock()
+		disconnecting := c.connectionTransition == connectionDisconnecting
+		c.mu.RUnlock()
+		if disconnecting {
+			break
+		}
+		runtime.Gosched()
+	}
+	if _, closes, _ := tr.counts(); closes != 0 {
+		t.Fatalf("Close calls while write blocked = %d", closes)
+	}
+	close(tr.releaseWrite)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-disconnectDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, closes, _ := tr.counts(); closes != 1 {
+		t.Fatalf("Close calls = %d, want 1", closes)
+	}
 }
 func (t *blockingOpenTransport) counts() (int, int, int) {
 	t.mu.Lock()

@@ -51,7 +51,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          go test -count=20 ./internal/app -run 'ResponseOwner|Interactive|ManualLine|Disconnect|CommandAdmission|DelayedManualLineResponse'
+          go test -count=20 ./internal/app -run 'ResponseOwner|Interactive|ManualLine|Disconnect|CommandAdmission|DelayedManualLineResponse|ConnectionTransition|ConnectAttempt|ConcurrentConnect|RealtimeWrite'
+
+      - name: Repeated focused connection race tests
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go test -race -count=20 ./internal/app -run 'ConnectionTransition|ConnectAttempt|ConcurrentConnect|RealtimeWrite|SoftReset'
 
       - name: Test serial-tagged packages
         if: matrix.os == 'ubuntu-latest'
