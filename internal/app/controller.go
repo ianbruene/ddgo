@@ -25,6 +25,8 @@ var ErrResponseBacklogFull = errors.New("response backlog full")
 var ErrCommandSessionInvariant = errors.New("controller command session invariant violated")
 var ErrConnectionTransition = errors.New("connection transition in progress")
 var ErrAlreadyConnected = errors.New("controller is already connected")
+var ErrConnectionInvariant = errors.New("controller connection invariant violated")
+var ErrControllerIOActive = errors.New("controller transport operation in progress")
 
 const defaultStatusPollInterval = 500 * time.Millisecond
 
@@ -57,6 +59,8 @@ const (
 	connectionDisconnecting
 )
 
+type connectAttemptID uint64
+
 type admissionKind uint8
 
 const (
@@ -86,6 +90,11 @@ type Controller struct {
 	run                               *programRun
 	responseOwner                     responseOwner
 	connectionTransition              connectionTransition
+	nextConnectAttempt                connectAttemptID
+	activeConnectAttempt              connectAttemptID
+	connectAttemptErr                 error
+	realtimeWriteActive               bool
+	realtimeWriteDone                 chan struct{}
 	statusPollCancel                  context.CancelFunc
 	statusPollDone                    chan struct{}
 	statusPollInterval                time.Duration
@@ -163,27 +172,58 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		c.emitError(err)
 		return err
 	}
-	c.connectionTransition = connectionConnecting
+	attempt := c.beginConnectAttemptLocked()
 	c.mu.Unlock()
-	if err := c.transport.Open(ctx, cfg); err != nil {
-		c.mu.Lock()
-		c.connectionTransition = connectionStable
+	openErr := c.transport.Open(ctx, cfg)
+
+	c.mu.Lock()
+	if c.connectionTransition != connectionConnecting || c.activeConnectAttempt != attempt {
+		c.finishConnectAttemptLocked(attempt)
+		c.mu.Unlock()
+		c.emitError(ErrConnectionInvariant)
+		return ErrConnectionInvariant
+	}
+	if openErr != nil || c.connectAttemptErr != nil {
+		err := openErr
+		if c.connectAttemptErr != nil {
+			err = c.connectAttemptErr
+		}
+		c.finishConnectAttemptLocked(attempt)
 		c.mu.Unlock()
 		c.emitError(err)
 		return err
 	}
-
-	c.mu.Lock()
 	c.state.Connected = true
 	c.state.PortName = cfg.Name
 	c.state.LastError = ""
-	c.connectionTransition = connectionStable
+	c.finishConnectAttemptLocked(attempt)
 	state := c.state
 	c.startStatusPollingLocked()
 	c.mu.Unlock()
 
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: fmt.Sprintf("connected to %s", cfg.Name)}
 	return nil
+}
+
+func (c *Controller) beginConnectAttemptLocked() connectAttemptID {
+	c.nextConnectAttempt++
+	if c.nextConnectAttempt == 0 {
+		c.nextConnectAttempt++
+	}
+	c.activeConnectAttempt = c.nextConnectAttempt
+	c.connectAttemptErr = nil
+	c.connectionTransition = connectionConnecting
+	return c.activeConnectAttempt
+}
+
+func (c *Controller) finishConnectAttemptLocked(id connectAttemptID) bool {
+	if id == 0 || c.activeConnectAttempt != id {
+		return false
+	}
+	c.activeConnectAttempt = 0
+	c.connectAttemptErr = nil
+	c.connectionTransition = connectionStable
+	return true
 }
 
 func (c *Controller) Disconnect() error {
@@ -194,10 +234,14 @@ func (c *Controller) Disconnect() error {
 		return err
 	}
 	c.connectionTransition = connectionDisconnecting
+	writeDone := c.realtimeWriteDone
 	c.terminateResponseOwnerLocked(c.responseOwner, ErrTransportDisconnected)
 	c.suppressNextTransportDisconnected = c.state.Connected
 	c.mu.Unlock()
 	c.stopStatusPolling()
+	if writeDone != nil {
+		<-writeDone
+	}
 	if err := c.transport.Close(); err != nil {
 		c.mu.Lock()
 		c.suppressNextTransportDisconnected = false
@@ -219,24 +263,13 @@ func (c *Controller) Disconnect() error {
 
 func (c *Controller) SendConsoleLine(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "?" {
-		c.mu.Lock()
-		err := c.admissionErrorLocked(admissionRealtime)
-		c.mu.Unlock()
-		if err != nil {
-			c.emitError(err)
-			return err
-		}
 		c.clearPendingQuietStatusReports()
 		msg, err := grbl.BuildAction(grbl.ActionStatus)
 		if err != nil {
 			c.emitError(err)
 			return err
 		}
-		if err := c.transport.Write(ctx, msg); err != nil {
-			c.emitError(err)
-			return err
-		}
-		return nil
+		return c.writeRealtimeMessage(ctx, msg)
 	}
 	line, parseOK := parseConsoleGCodeLine(text)
 	if parseOK {
@@ -321,21 +354,20 @@ func (c *Controller) JogTo(ctx context.Context, axis string, target float64, fee
 }
 
 func (c *Controller) StopMotion(ctx context.Context) error {
-	c.mu.RLock()
-	transitionErr := c.admissionErrorLocked(admissionRealtime)
+	c.mu.Lock()
 	programActive := c.state.ProgramStatus.IsActive() || c.run != nil
-	c.mu.RUnlock()
-	if transitionErr != nil {
-		c.emitError(transitionErr)
-		return transitionErr
-	}
 	if programActive {
+		c.mu.Unlock()
 		c.emitError(ErrProgramActive)
 		return ErrProgramActive
 	}
-	if err := c.rejectManualWriteIfBusy(); err != nil {
+	if err := c.beginRealtimeWriteLocked(); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
 		return err
 	}
+	c.mu.Unlock()
+	defer c.endRealtimeWrite()
 	msg, err := grbl.BuildAction(grbl.ActionJogCancel)
 	if err != nil {
 		c.emitError(err)
@@ -394,12 +426,17 @@ func (c *Controller) pollStatusLoop(ctx context.Context, done chan struct{}, int
 }
 
 func (c *Controller) writeStatusPoll(ctx context.Context) error {
-	c.mu.RLock()
-	connected := c.state.Connected
-	c.mu.RUnlock()
-	if !connected {
+	c.mu.Lock()
+	if !c.state.Connected {
+		c.mu.Unlock()
 		return nil
 	}
+	if err := c.beginRealtimeWriteLocked(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+	defer c.endRealtimeWrite()
 	msg, err := grbl.BuildAction(grbl.ActionStatus)
 	if err != nil {
 		return err
@@ -419,13 +456,14 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 }
 
 func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
-	c.mu.Lock()
-	if err := c.admissionErrorLocked(admissionRealtime); err != nil {
-		c.mu.Unlock()
-		c.emitError(err)
-		return err
+	if actionProducesTerminalResponse(action) {
+		msg, err := grbl.BuildAction(action)
+		if err != nil {
+			c.emitError(err)
+			return err
+		}
+		return c.writeManualResponseMessage(ctx, msg)
 	}
-	c.mu.Unlock()
 	if action == grbl.ActionStatus {
 		c.mu.RLock()
 		programActive := c.state.ProgramStatus.IsActive() || c.run != nil
@@ -443,7 +481,13 @@ func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
 	}
 	if action == grbl.ActionSoftReset {
 		c.mu.Lock()
-		err = c.prepareSoftResetLocked()
+		err = c.beginRealtimeWriteLocked()
+		if err == nil {
+			err = c.prepareSoftResetLocked()
+			if err != nil {
+				c.endRealtimeWriteLocked()
+			}
+		}
 		c.mu.Unlock()
 		if err != nil {
 			c.emitError(err)
@@ -451,15 +495,50 @@ func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
 		}
 		// Cancellation deliberately precedes the write: reset RX must never be
 		// routed to the command session whose controller state it invalidates.
+		defer c.endRealtimeWrite()
 		if err := c.transport.Write(ctx, msg); err != nil {
 			c.emitError(err)
 			return err
 		}
 		return nil
 	}
-	if actionProducesTerminalResponse(action) {
-		return c.writeManualResponseMessage(ctx, msg)
+	return c.writeRealtimeMessage(ctx, msg)
+}
+
+func (c *Controller) beginRealtimeWriteLocked() error {
+	if err := c.admissionErrorLocked(admissionRealtime); err != nil {
+		return err
 	}
+	c.realtimeWriteActive = true
+	c.realtimeWriteDone = make(chan struct{})
+	return nil
+}
+
+func (c *Controller) endRealtimeWriteLocked() {
+	if !c.realtimeWriteActive {
+		return
+	}
+	done := c.realtimeWriteDone
+	c.realtimeWriteActive = false
+	c.realtimeWriteDone = nil
+	close(done)
+}
+
+func (c *Controller) endRealtimeWrite() {
+	c.mu.Lock()
+	c.endRealtimeWriteLocked()
+	c.mu.Unlock()
+}
+
+func (c *Controller) writeRealtimeMessage(ctx context.Context, msg transport.Message) error {
+	c.mu.Lock()
+	if err := c.beginRealtimeWriteLocked(); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
+	c.mu.Unlock()
+	defer c.endRealtimeWrite()
 	if err := c.transport.Write(ctx, msg); err != nil {
 		c.emitError(err)
 		return err
@@ -643,18 +722,24 @@ func (c *Controller) StopProgram(ctx context.Context) error {
 		c.emitError(err)
 		return err
 	}
+	if err := c.beginRealtimeWriteLocked(); err != nil {
+		c.mu.Unlock()
+		c.emitError(err)
+		return err
+	}
 	c.run = nil
 	c.releaseResponseOwnerLocked(responseOwnerProgram, run.responseSession())
 	c.state.ProgramStatus = ProgramStopped
 	state := c.state
 	c.mu.Unlock()
+	defer c.endRealtimeWrite()
 
 	run.cancel()
 	var firstErr error
-	if err := c.writeProgramAction(ctx, grbl.ActionHold); err != nil && firstErr == nil {
+	if err := c.writeProgramActionReserved(ctx, grbl.ActionHold); err != nil && firstErr == nil {
 		firstErr = err
 	}
-	if err := c.writeProgramAction(ctx, grbl.ActionSoftReset); err != nil && firstErr == nil {
+	if err := c.writeProgramActionReserved(ctx, grbl.ActionSoftReset); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program stopped"}
@@ -876,6 +961,9 @@ func (c *Controller) handleTransportDisconnected() {
 	err := ErrTransportDisconnected
 	var cancel context.CancelFunc
 	c.mu.Lock()
+	if c.connectionTransition == connectionConnecting && c.activeConnectAttempt != 0 {
+		c.connectAttemptErr = err
+	}
 	run := c.run
 	if run != nil {
 		c.run = nil
@@ -1006,6 +1094,17 @@ func (c *Controller) clearPendingQuietStatusReports() {
 }
 
 func (c *Controller) writeProgramAction(ctx context.Context, action grbl.Action) error {
+	msg, err := grbl.BuildAction(action)
+	if err != nil {
+		c.emitError(err)
+		return err
+	}
+	return c.writeRealtimeMessage(ctx, msg)
+}
+
+// writeProgramActionReserved writes within the reservation StopProgram acquired
+// before releasing program ownership.
+func (c *Controller) writeProgramActionReserved(ctx context.Context, action grbl.Action) error {
 	msg, err := grbl.BuildAction(action)
 	if err != nil {
 		c.emitError(err)
