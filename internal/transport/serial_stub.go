@@ -17,8 +17,8 @@ func NewSerialTransport() *SerialTransport {
 	return &SerialTransport{events: make(chan Event, 256)}
 }
 
-func (t *SerialTransport) Open(_ context.Context, _ PortConfig) error {
-	return ErrSerialTransportNotBuilt
+func (t *SerialTransport) Open(_ context.Context, _ PortConfig) (ConnectionGeneration, error) {
+	return 0, ErrSerialTransportNotBuilt
 }
 func (t *SerialTransport) Close() error { return nil }
 func (t *SerialTransport) Write(_ context.Context, _ Message) error {

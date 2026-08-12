@@ -12,11 +12,18 @@ func TestFakeTransport_OpenWriteCloseLifecycle(t *testing.T) {
 
 	f := NewFakeTransport()
 	cfg := DefaultPortConfig("/dev/ttyACM0")
-	if err := f.Open(context.Background(), cfg); err != nil {
+	generation, err := f.Open(context.Background(), cfg)
+	if err != nil {
 		t.Fatalf("Open() error = %v", err)
+	}
+	if generation == 0 {
+		t.Fatal("Open() returned generation zero")
 	}
 
 	connected := waitForTransportEvent(t, f.Events(), EventConnected)
+	if connected.Generation != generation {
+		t.Fatalf("connected generation = %d, want %d", connected.Generation, generation)
+	}
 	if got, want := connected.Text, cfg.Name; got != want {
 		t.Fatalf("connected event text = %q, want %q", got, want)
 	}
@@ -27,6 +34,9 @@ func TestFakeTransport_OpenWriteCloseLifecycle(t *testing.T) {
 	}
 
 	tx := waitForTransportEvent(t, f.Events(), EventTX)
+	if tx.Generation != generation {
+		t.Fatalf("TX generation = %d, want %d", tx.Generation, generation)
+	}
 	if got, want := tx.Text, msg.Display; got != want {
 		t.Fatalf("tx text = %q, want %q", got, want)
 	}
@@ -44,6 +54,9 @@ func TestFakeTransport_OpenWriteCloseLifecycle(t *testing.T) {
 
 	f.InjectRX("ok")
 	rx := waitForTransportEvent(t, f.Events(), EventRX)
+	if rx.Generation != generation {
+		t.Fatalf("RX generation = %d, want %d", rx.Generation, generation)
+	}
 	if got, want := rx.Text, "ok"; got != want {
 		t.Fatalf("rx text = %q, want %q", got, want)
 	}
@@ -51,7 +64,17 @@ func TestFakeTransport_OpenWriteCloseLifecycle(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	_ = waitForTransportEvent(t, f.Events(), EventDisconnected)
+	disconnected := waitForTransportEvent(t, f.Events(), EventDisconnected)
+	if disconnected.Generation != generation {
+		t.Fatalf("disconnect generation = %d, want %d", disconnected.Generation, generation)
+	}
+	second, err := f.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == 0 || second == generation {
+		t.Fatalf("reopen generation = %d, prior %d", second, generation)
+	}
 }
 
 func TestFakeTransport_WriteWhenClosed(t *testing.T) {
@@ -69,12 +92,12 @@ func TestFakeTransport_ConfiguredErrors(t *testing.T) {
 	f := NewFakeTransport()
 	openErr := errors.New("open failed")
 	f.SetOpenError(openErr)
-	if err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); !errors.Is(err, openErr) {
+	if _, err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); !errors.Is(err, openErr) {
 		t.Fatalf("Open() error = %v, want %v", err, openErr)
 	}
 
 	f = NewFakeTransport()
-	if err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); err != nil {
+	if _, err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	writeErr := errors.New("write failed")
@@ -110,7 +133,7 @@ func TestFakeTransport_WrittenPayloadsAreCopied(t *testing.T) {
 	t.Parallel()
 
 	f := NewFakeTransport()
-	if err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); err != nil {
+	if _, err := f.Open(context.Background(), DefaultPortConfig("/dev/ttyACM0")); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	_ = waitForTransportEvent(t, f.Events(), EventConnected)

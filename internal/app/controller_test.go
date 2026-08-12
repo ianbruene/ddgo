@@ -254,7 +254,7 @@ func TestProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 		t.Fatalf("write = %q, want $G", got)
 	}
 	for i := 0; i < 65; i++ {
-		tr.events <- transport.Event{Kind: transport.EventRX, When: time.Now(), Text: "ok"}
+		tr.events <- transport.Event{Kind: transport.EventRX, Generation: 1, When: time.Now(), Text: "ok"}
 	}
 	state := waitForState(t, controller, func(s State) bool {
 		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "program response backlog full")
@@ -288,7 +288,7 @@ func TestProgramQueryResponseBacklogOverflowFailsProgram(t *testing.T) {
 		t.Fatalf("write = %q, want $#", got)
 	}
 	for i := 0; i < 257; i++ {
-		tr.events <- transport.Event{Kind: transport.EventRX, When: time.Now(), Text: fmt.Sprintf("[NOISE:%03d]", i)}
+		tr.events <- transport.Event{Kind: transport.EventRX, Generation: 1, When: time.Now(), Text: fmt.Sprintf("[NOISE:%03d]", i)}
 	}
 	state := waitForState(t, controller, func(s State) bool {
 		return s.ProgramStatus == ProgramFailed && strings.Contains(s.LastError, "program response backlog full")
@@ -2030,8 +2030,9 @@ func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *tes
 	run := &programRun{rxCh: make(chan string, 1)}
 	run.session = newResponseSession(run.rxCh)
 	controller.mu.Lock()
+	run.generation = controller.connectionGeneration
 	controller.run = run
-	controller.responseOwner = responseOwner{kind: responseOwnerProgram, session: run.session}
+	controller.responseOwner = responseOwner{kind: responseOwnerProgram, session: run.session, generation: controller.connectionGeneration}
 	controller.state.ProgramStatus = ProgramRunning
 	controller.mu.Unlock()
 
@@ -2893,8 +2894,10 @@ func newBlockingProgramTransport() *blockingProgramTransport {
 	}
 }
 
-func (t *blockingProgramTransport) Events() <-chan transport.Event                   { return t.events }
-func (t *blockingProgramTransport) Open(context.Context, transport.PortConfig) error { return nil }
+func (t *blockingProgramTransport) Events() <-chan transport.Event { return t.events }
+func (t *blockingProgramTransport) Open(context.Context, transport.PortConfig) (transport.ConnectionGeneration, error) {
+	return 1, nil
+}
 func (t *blockingProgramTransport) Close() error {
 	t.release()
 	return nil

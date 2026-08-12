@@ -23,13 +23,15 @@ type serialPort interface {
 }
 
 type SerialTransport struct {
-	mu      sync.Mutex
-	port    serialPort
-	cfg     PortConfig
-	events  chan Event
-	closed  chan struct{}
-	wg      sync.WaitGroup
-	readBuf bytes.Buffer
+	mu             sync.Mutex
+	port           serialPort
+	cfg            PortConfig
+	events         chan Event
+	closed         chan struct{}
+	wg             sync.WaitGroup
+	readBuf        bytes.Buffer
+	generation     ConnectionGeneration
+	nextGeneration ConnectionGeneration
 }
 
 func NewSerialTransport() *SerialTransport {
@@ -38,11 +40,11 @@ func NewSerialTransport() *SerialTransport {
 
 func (t *SerialTransport) Events() <-chan Event { return t.events }
 
-func (t *SerialTransport) Open(_ context.Context, cfg PortConfig) error {
+func (t *SerialTransport) Open(_ context.Context, cfg PortConfig) (ConnectionGeneration, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.port != nil {
-		return errors.New("serial port already open")
+		return 0, errors.New("serial port already open")
 	}
 	mode := &serial.Mode{
 		BaudRate: serialArduinoBaudRate,
@@ -52,27 +54,35 @@ func (t *SerialTransport) Open(_ context.Context, cfg PortConfig) error {
 	}
 	port, err := serial.Open(cfg.Name, mode)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	t.nextGeneration++
+	if t.nextGeneration == 0 {
+		t.nextGeneration++
+	}
+	generation := t.nextGeneration
 	t.port = port
+	t.generation = generation
 	t.cfg = cfg
 	t.closed = make(chan struct{})
 	t.wg.Add(1)
-	go t.readLoop(t.closed, port)
-	t.events <- Event{Kind: EventConnected, When: time.Now(), Text: cfg.Name}
-	return nil
+	go t.readLoop(t.closed, port, generation)
+	t.events <- Event{Kind: EventConnected, Generation: generation, When: time.Now(), Text: cfg.Name}
+	return generation, nil
 }
 
 func (t *SerialTransport) Close() error {
 	t.mu.Lock()
 	port := t.port
 	closed := t.closed
+	generation := t.generation
 	if port == nil {
 		t.mu.Unlock()
 		return nil
 	}
 	t.port = nil
 	t.closed = nil
+	t.generation = 0
 	t.mu.Unlock()
 
 	if closed != nil {
@@ -80,7 +90,7 @@ func (t *SerialTransport) Close() error {
 	}
 	err := port.Close()
 	t.wg.Wait()
-	t.events <- Event{Kind: EventDisconnected, When: time.Now()}
+	t.events <- Event{Kind: EventDisconnected, Generation: generation, When: time.Now()}
 	return err
 }
 
@@ -89,6 +99,7 @@ func (t *SerialTransport) Write(ctx context.Context, msg Message) error {
 	suppressLog := msg.SuppressLog
 	t.mu.Lock()
 	port := t.port
+	generation := t.generation
 	t.mu.Unlock()
 	if port == nil {
 		return ErrNotOpen
@@ -101,16 +112,16 @@ func (t *SerialTransport) Write(ctx context.Context, msg Message) error {
 		}
 		n, err := port.Write(msg.Payload)
 		if err != nil {
-			t.events <- Event{Kind: EventError, When: time.Now(), Err: err}
+			t.events <- Event{Kind: EventError, Generation: generation, When: time.Now(), Err: err}
 			return err
 		}
 		msg.Payload = msg.Payload[n:]
 	}
-	t.events <- Event{Kind: EventTX, When: time.Now(), Text: display, SuppressLog: suppressLog}
+	t.events <- Event{Kind: EventTX, Generation: generation, When: time.Now(), Text: display, SuppressLog: suppressLog}
 	return nil
 }
 
-func (t *SerialTransport) readLoop(closed <-chan struct{}, port serialPort) {
+func (t *SerialTransport) readLoop(closed <-chan struct{}, port serialPort, generation ConnectionGeneration) {
 	defer t.wg.Done()
 	// A partial line belongs to the connection that read it. In particular, do
 	// not join bytes left by a disconnected device to the first response after
@@ -131,36 +142,44 @@ func (t *SerialTransport) readLoop(closed <-chan struct{}, port serialPort) {
 			default:
 			}
 			if errors.Is(err, io.EOF) || strings.Contains(strings.ToLower(err.Error()), "closed") {
-				t.markUnexpectedDisconnected(port, nil)
+				t.markUnexpectedDisconnected(port, generation, nil)
 				return
 			}
-			t.markUnexpectedDisconnected(port, err)
+			t.markUnexpectedDisconnected(port, generation, err)
 			return
 		}
 		if n == 0 {
 			continue
 		}
-		t.consume(buf[:n])
+		t.consumeForGeneration(buf[:n], generation)
 	}
 }
 
-func (t *SerialTransport) markUnexpectedDisconnected(port serialPort, err error) {
+func (t *SerialTransport) markUnexpectedDisconnected(port serialPort, generation ConnectionGeneration, err error) {
 	t.mu.Lock()
-	if t.port != port {
+	if t.port != port || t.generation != generation {
 		t.mu.Unlock()
 		return
 	}
 	t.port = nil
 	t.closed = nil
+	t.generation = 0
 	t.mu.Unlock()
 
 	if err != nil {
-		t.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error()}
+		t.events <- Event{Kind: EventError, Generation: generation, When: time.Now(), Err: err, Text: err.Error()}
 	}
-	t.events <- Event{Kind: EventDisconnected, When: time.Now()}
+	t.events <- Event{Kind: EventDisconnected, Generation: generation, When: time.Now()}
 }
 
 func (t *SerialTransport) consume(chunk []byte) {
+	t.mu.Lock()
+	generation := t.generation
+	t.mu.Unlock()
+	t.consumeForGeneration(chunk, generation)
+}
+
+func (t *SerialTransport) consumeForGeneration(chunk []byte, generation ConnectionGeneration) {
 	for _, b := range chunk {
 		switch b {
 		case '\n', '\r':
@@ -169,7 +188,7 @@ func (t *SerialTransport) consume(chunk []byte) {
 			}
 			line := t.readBuf.String()
 			t.readBuf.Reset()
-			t.events <- Event{Kind: EventRX, When: time.Now(), Text: line, Payload: []byte(line)}
+			t.events <- Event{Kind: EventRX, Generation: generation, When: time.Now(), Text: line, Payload: []byte(line)}
 		default:
 			_ = t.readBuf.WriteByte(b)
 		}
