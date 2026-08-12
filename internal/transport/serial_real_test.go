@@ -3,6 +3,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -10,6 +11,28 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSerialTransportStaleReadLoopGenerationCannotClearReconnect(t *testing.T) {
+	oldPort := newScriptedSerialPort()
+	newPort := newScriptedSerialPort()
+	tr := &SerialTransport{port: newPort, generation: 2, events: make(chan Event, 8)}
+
+	tr.markUnexpectedDisconnected(oldPort, 1, errors.New("old read failed"))
+	tr.mu.Lock()
+	gotPort, gotGeneration := tr.port, tr.generation
+	tr.mu.Unlock()
+	if gotPort != newPort || gotGeneration != 2 {
+		t.Fatalf("active connection changed by stale loop: port=%p generation=%d", gotPort, gotGeneration)
+	}
+	if err := tr.Write(context.Background(), NewLineMessage("?")); err != nil {
+		t.Fatalf("Write on new connection: %v", err)
+	}
+	ev := waitForNextSerialTransportEvent(t, tr.events)
+	if ev.Kind != EventTX || ev.Generation != 2 {
+		t.Fatalf("new connection event = %+v, want TX generation 2", ev)
+	}
+	assertNoTransportEvent(t, tr.events, noUnexpectedTransportEventWindow)
+}
 
 const noUnexpectedTransportEventWindow = 100 * time.Millisecond
 
@@ -61,12 +84,13 @@ func (p *scriptedSerialPort) Close() error {
 
 func newTestSerialTransport(port serialPort) *SerialTransport {
 	tr := &SerialTransport{
-		port:   port,
-		events: make(chan Event, 256),
-		closed: make(chan struct{}),
+		port:       port,
+		events:     make(chan Event, 256),
+		closed:     make(chan struct{}),
+		generation: 1,
 	}
 	tr.wg.Add(1)
-	go tr.readLoop(tr.closed, port)
+	go tr.readLoop(tr.closed, port, 1)
 	return tr
 }
 
@@ -223,9 +247,10 @@ func TestSerialTransportReadLoopDiscardsPartialLineFromPriorConnection(t *testin
 	tr.consume([]byte("stale partial response"))
 
 	tr.port = port
+	tr.generation = 1
 	tr.closed = make(chan struct{})
 	tr.wg.Add(1)
-	go tr.readLoop(tr.closed, port)
+	go tr.readLoop(tr.closed, port, 1)
 	port.readCh <- scriptedRead{data: []byte("ok\n")}
 
 	event := waitForNextSerialTransportEvent(t, tr.events)

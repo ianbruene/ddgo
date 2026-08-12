@@ -47,8 +47,9 @@ const (
 )
 
 type responseOwner struct {
-	kind    responseOwnerKind
-	session *responseSession
+	kind       responseOwnerKind
+	session    *responseSession
+	generation transport.ConnectionGeneration
 }
 
 type connectionTransition uint8
@@ -73,39 +74,43 @@ const (
 )
 
 type programRun struct {
-	program   gcode.Program
-	session   *responseSession
-	rxCh      chan string
-	queryRxCh chan string
-	cancel    context.CancelFunc
+	program    gcode.Program
+	session    *responseSession
+	rxCh       chan string
+	queryRxCh  chan string
+	cancel     context.CancelFunc
+	generation transport.ConnectionGeneration
 }
 
 type Controller struct {
-	mu                                sync.RWMutex
-	transport                         transport.Transport
-	listPorts                         ports.ListFunc
-	events                            chan Event
-	state                             State
-	loaded                            gcode.Program
-	run                               *programRun
-	responseOwner                     responseOwner
-	connectionTransition              connectionTransition
-	nextConnectAttempt                connectAttemptID
-	activeConnectAttempt              connectAttemptID
-	connectAttemptErr                 error
-	realtimeWriteActive               bool
-	realtimeWriteDone                 chan struct{}
-	statusPollCancel                  context.CancelFunc
-	statusPollDone                    chan struct{}
-	statusPollInterval                time.Duration
-	macroEngine                       *macro.Engine
-	motionRewriter                    macro.MotionRewriter
-	variables                         *macro.VariableStore
-	contour                           *macro.ContourState
-	lastProbe                         macro.Point
-	hasLastProbe                      bool
-	pendingQuietStatusReports         int
-	suppressNextTransportDisconnected bool
+	mu                                      sync.RWMutex
+	transport                               transport.Transport
+	listPorts                               ports.ListFunc
+	events                                  chan Event
+	state                                   State
+	loaded                                  gcode.Program
+	run                                     *programRun
+	responseOwner                           responseOwner
+	connectionTransition                    connectionTransition
+	nextConnectAttempt                      connectAttemptID
+	activeConnectAttempt                    connectAttemptID
+	connectAttemptErr                       error
+	connectAttemptGeneration                transport.ConnectionGeneration
+	pendingDisconnectedGenerations          map[transport.ConnectionGeneration]error
+	connectionGeneration                    transport.ConnectionGeneration
+	realtimeWriteActive                     bool
+	realtimeWriteDone                       chan struct{}
+	statusPollCancel                        context.CancelFunc
+	statusPollDone                          chan struct{}
+	statusPollInterval                      time.Duration
+	macroEngine                             *macro.Engine
+	motionRewriter                          macro.MotionRewriter
+	variables                               *macro.VariableStore
+	contour                                 *macro.ContourState
+	lastProbe                               macro.Point
+	hasLastProbe                            bool
+	pendingQuietStatusReports               int
+	suppressTransportDisconnectedGeneration transport.ConnectionGeneration
 }
 
 func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller {
@@ -174,7 +179,7 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 	}
 	attempt := c.beginConnectAttemptLocked()
 	c.mu.Unlock()
-	openErr := c.transport.Open(ctx, cfg)
+	generation, openErr := c.transport.Open(ctx, cfg)
 
 	c.mu.Lock()
 	if c.connectionTransition != connectionConnecting || c.activeConnectAttempt != attempt {
@@ -182,6 +187,16 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		c.mu.Unlock()
 		c.emitError(ErrConnectionInvariant)
 		return ErrConnectionInvariant
+	}
+	if openErr == nil && generation == 0 {
+		openErr = ErrConnectionInvariant
+	}
+	if openErr == nil {
+		c.connectAttemptGeneration = generation
+		if err, ok := c.pendingDisconnectedGenerations[generation]; ok {
+			c.connectAttemptErr = err
+			delete(c.pendingDisconnectedGenerations, generation)
+		}
 	}
 	if openErr != nil || c.connectAttemptErr != nil {
 		err := openErr
@@ -194,6 +209,7 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		return err
 	}
 	c.state.Connected = true
+	c.connectionGeneration = generation
 	c.state.PortName = cfg.Name
 	c.state.LastError = ""
 	c.finishConnectAttemptLocked(attempt)
@@ -212,6 +228,8 @@ func (c *Controller) beginConnectAttemptLocked() connectAttemptID {
 	}
 	c.activeConnectAttempt = c.nextConnectAttempt
 	c.connectAttemptErr = nil
+	c.connectAttemptGeneration = 0
+	c.pendingDisconnectedGenerations = make(map[transport.ConnectionGeneration]error)
 	c.connectionTransition = connectionConnecting
 	return c.activeConnectAttempt
 }
@@ -222,6 +240,8 @@ func (c *Controller) finishConnectAttemptLocked(id connectAttemptID) bool {
 	}
 	c.activeConnectAttempt = 0
 	c.connectAttemptErr = nil
+	c.connectAttemptGeneration = 0
+	c.pendingDisconnectedGenerations = nil
 	c.connectionTransition = connectionStable
 	return true
 }
@@ -236,7 +256,7 @@ func (c *Controller) Disconnect() error {
 	c.connectionTransition = connectionDisconnecting
 	writeDone := c.realtimeWriteDone
 	c.terminateResponseOwnerLocked(c.responseOwner, ErrTransportDisconnected)
-	c.suppressNextTransportDisconnected = c.state.Connected
+	c.suppressTransportDisconnectedGeneration = c.connectionGeneration
 	c.mu.Unlock()
 	c.stopStatusPolling()
 	if writeDone != nil {
@@ -244,7 +264,7 @@ func (c *Controller) Disconnect() error {
 	}
 	if err := c.transport.Close(); err != nil {
 		c.mu.Lock()
-		c.suppressNextTransportDisconnected = false
+		c.suppressTransportDisconnectedGeneration = 0
 		c.connectionTransition = connectionStable
 		c.mu.Unlock()
 		c.emitError(err)
@@ -640,9 +660,10 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 		return err
 	}
 	run := &programRun{
-		program: c.loaded,
-		rxCh:    make(chan string, 64),
-		cancel:  cancel,
+		program:    c.loaded,
+		rxCh:       make(chan string, 64),
+		cancel:     cancel,
+		generation: c.connectionGeneration,
 	}
 	run.session = newResponseSession(run.rxCh)
 	if err := c.acquireResponseOwnerLocked(responseOwnerProgram, run.session); err != nil {
@@ -955,14 +976,15 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
 }
 
-func (c *Controller) handleTransportDisconnected() {
+func (c *Controller) handleTransportDisconnected(generation transport.ConnectionGeneration) {
 	c.stopStatusPolling()
 
 	err := ErrTransportDisconnected
 	var cancel context.CancelFunc
 	c.mu.Lock()
-	if c.connectionTransition == connectionConnecting && c.activeConnectAttempt != 0 {
-		c.connectAttemptErr = err
+	if c.connectionGeneration != generation || generation == 0 {
+		c.mu.Unlock()
+		return
 	}
 	run := c.run
 	if run != nil {
@@ -1000,6 +1022,7 @@ func (c *Controller) clearConnectionStateLocked() bool {
 		c.state.HasFeedSpindle ||
 		c.state.LastStatusRaw != ""
 	c.state.Connected = false
+	c.connectionGeneration = 0
 	c.state.MachineState = ""
 	c.state.HasMachinePosition = false
 	c.state.HasWorkPosition = false
@@ -1119,21 +1142,31 @@ func (c *Controller) writeProgramActionReserved(ctx context.Context, action grbl
 
 func (c *Controller) runTransportEventBridge() {
 	for ev := range c.transport.Events() {
-		snapshot := c.Snapshot()
 		switch ev.Kind {
 		case transport.EventConnected:
 			continue
 		case transport.EventDisconnected:
-			if c.consumeExpectedTransportDisconnected() {
+			if !c.acceptDisconnectedEvent(ev.Generation) {
 				continue
 			}
-			c.handleTransportDisconnected()
+			c.handleTransportDisconnected(ev.Generation)
 		case transport.EventTX:
+			c.mu.RLock()
+			accepted := c.acceptsTransportEventLocked(ev)
+			snapshot := c.state
+			c.mu.RUnlock()
+			if !accepted {
+				continue
+			}
 			if !ev.SuppressLog {
 				c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
 			}
 		case transport.EventRX:
 			c.mu.Lock()
+			if !c.acceptsTransportEventLocked(ev) {
+				c.mu.Unlock()
+				continue
+			}
 			suppressRXLog := false
 			if report, ok := grbl.ParseStatusReport(ev.Text); ok {
 				if c.pendingQuietStatusReports > 0 {
@@ -1160,7 +1193,7 @@ func (c *Controller) runTransportEventBridge() {
 					c.state.HasFeedSpindle = true
 				}
 			}
-			overflowRun := c.deliverResponseLocked(ev.Text)
+			overflowRun := c.deliverResponseLocked(ev.Generation, ev.Text)
 			state := c.state
 			c.mu.Unlock()
 			if overflowRun != nil {
@@ -1170,23 +1203,55 @@ func (c *Controller) runTransportEventBridge() {
 				c.events <- Event{Kind: EventConsoleRX, When: ev.When, Text: ev.Text, State: state, Raw: ev}
 			}
 		case transport.EventError:
+			c.mu.RLock()
+			accepted := c.acceptsTransportEventLocked(ev)
+			c.mu.RUnlock()
+			if !accepted {
+				continue
+			}
 			c.emitError(ev.Err)
 		}
 	}
 }
 
-func (c *Controller) consumeExpectedTransportDisconnected() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.suppressNextTransportDisconnected {
-		return false
-	}
-	c.suppressNextTransportDisconnected = false
-	return true
+// acceptsTransportEventLocked is the common policy for connection traffic:
+// only non-zero events from the physical connection committed by Connect are
+// allowed to reach state parsing, response routing, or operator logging.
+func (c *Controller) acceptsTransportEventLocked(ev transport.Event) bool {
+	return ev.Generation != 0 && ev.Generation == c.connectionGeneration
 }
 
-func (c *Controller) deliverResponseLocked(line string) *programRun {
+func (c *Controller) acceptDisconnectedEvent(generation transport.ConnectionGeneration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if generation != 0 && c.suppressTransportDisconnectedGeneration == generation {
+		c.suppressTransportDisconnectedGeneration = 0
+		return false
+	}
+	if c.connectionTransition == connectionConnecting && c.activeConnectAttempt != 0 {
+		if c.connectAttemptGeneration == generation && generation != 0 {
+			c.connectAttemptErr = ErrTransportDisconnected
+		} else if c.connectAttemptGeneration == 0 && generation != 0 {
+			// Only events racing the single active Open are relevant. Keep this
+			// deliberately bounded against a malformed/noisy transport.
+			if len(c.pendingDisconnectedGenerations) >= 16 {
+				for old := range c.pendingDisconnectedGenerations {
+					delete(c.pendingDisconnectedGenerations, old)
+					break
+				}
+			}
+			c.pendingDisconnectedGenerations[generation] = ErrTransportDisconnected
+		}
+		return false
+	}
+	return generation != 0 && generation == c.connectionGeneration
+}
+
+func (c *Controller) deliverResponseLocked(generation transport.ConnectionGeneration, line string) *programRun {
 	owner := c.responseOwner
+	if owner.kind != responseOwnerNone && owner.generation != generation {
+		return nil
+	}
 	switch owner.kind {
 	case responseOwnerNone:
 		return nil
@@ -1203,7 +1268,7 @@ func (c *Controller) deliverResponseLocked(line string) *programRun {
 		return nil
 	case responseOwnerProgram:
 		run := c.run
-		if run == nil || run.responseSession() != owner.session {
+		if run == nil || run.responseSession() != owner.session || run.generation != generation {
 			c.terminateResponseOwnerLocked(owner, ErrCommandSessionInvariant)
 			c.state.ProgramStatus = ProgramFailed
 			c.state.LastError = ErrCommandSessionInvariant.Error()

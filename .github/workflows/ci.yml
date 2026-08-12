@@ -59,6 +59,14 @@ jobs:
         run: |
           go test -race -count=20 ./internal/app -run 'ConnectionTransition|ConnectAttempt|ConcurrentConnect|RealtimeWrite|SoftReset'
 
+      - name: Repeated connection generation isolation tests
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go test -count=50 ./internal/app -run 'Generation|StaleEvent|StaleRX|StaleDisconnect|ResponseOwner|ConnectAttempt|Reconnect'
+          go test -race -count=20 ./internal/app -run 'Generation|StaleEvent|StaleRX|StaleDisconnect|ResponseOwner|ConnectAttempt|Reconnect'
+          go test -race -count=50 -tags serial ./internal/transport -run 'Generation|Reconnect|Stale|ReadLoop'
+
       - name: Test serial-tagged packages
         if: matrix.os == 'ubuntu-latest'
         run: go test -tags serial ./internal/transport ./internal/ports ./internal/app ./internal/grbl

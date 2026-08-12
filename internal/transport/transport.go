@@ -41,6 +41,10 @@ func NewRawMessage(payload []byte, display string) Message {
 
 type EventKind string
 
+// ConnectionGeneration identifies one physical connection opened by a
+// Transport. Zero is reserved for events not associated with a connection.
+type ConnectionGeneration uint64
+
 const (
 	EventConnected    EventKind = "connected"
 	EventDisconnected EventKind = "disconnected"
@@ -51,6 +55,7 @@ const (
 
 type Event struct {
 	Kind        EventKind
+	Generation  ConnectionGeneration
 	When        time.Time
 	Text        string
 	Err         error
@@ -59,7 +64,7 @@ type Event struct {
 }
 
 type Transport interface {
-	Open(ctx context.Context, cfg PortConfig) error
+	Open(ctx context.Context, cfg PortConfig) (ConnectionGeneration, error)
 	Close() error
 	Write(ctx context.Context, msg Message) error
 	Events() <-chan Event

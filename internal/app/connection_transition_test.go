@@ -33,7 +33,7 @@ func newBlockingOpenTransport() *blockingOpenTransport {
 	return &blockingOpenTransport{events: make(chan transport.Event, 16), openStarted: make(chan struct{}), releaseOpen: make(chan struct{})}
 }
 func (t *blockingOpenTransport) Events() <-chan transport.Event { return t.events }
-func (t *blockingOpenTransport) Open(ctx context.Context, _ transport.PortConfig) error {
+func (t *blockingOpenTransport) Open(ctx context.Context, _ transport.PortConfig) (transport.ConnectionGeneration, error) {
 	t.mu.Lock()
 	t.openCalls++
 	t.mu.Unlock()
@@ -44,9 +44,12 @@ func (t *blockingOpenTransport) Open(ctx context.Context, _ transport.PortConfig
 		err := t.openErr
 		t.openErr = nil
 		t.mu.Unlock()
-		return err
+		if err != nil {
+			return 0, err
+		}
+		return transport.ConnectionGeneration(t.openCalls), nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return 0, ctx.Err()
 	}
 }
 func (t *blockingOpenTransport) Close() error {
@@ -74,12 +77,14 @@ func TestConnectAttemptInvalidatedByDisconnectBeforeCommit(t *testing.T) {
 	c.statusPollInterval = time.Hour
 	done := beginBlockedConnect(t, tr, c, context.Background())
 
-	tr.events <- transport.Event{Kind: transport.EventDisconnected, When: time.Now()}
+	tr.events <- transport.Event{Kind: transport.EventDisconnected, Generation: 1, When: time.Now()}
+	// Open has not returned its physical generation yet. The bridge records the
+	// disconnect and Connect correlates it synchronously after Open returns.
 	for {
 		c.mu.RLock()
-		invalidated := errors.Is(c.connectAttemptErr, ErrTransportDisconnected)
+		_, recorded := c.pendingDisconnectedGenerations[1]
 		c.mu.RUnlock()
-		if invalidated {
+		if recorded {
 			break
 		}
 		runtime.Gosched()
@@ -136,6 +141,7 @@ func TestSoftResetReservationBlocksReplacementOwner(t *testing.T) {
 	c := NewController(tr, nil)
 	ownerA := newResponseSession(make(chan string, 1))
 	c.mu.Lock()
+	c.connectionGeneration = 1
 	if err := c.acquireResponseOwnerLocked(responseOwnerManualLine, ownerA); err != nil {
 		c.mu.Unlock()
 		t.Fatal(err)
@@ -286,7 +292,7 @@ func TestConnectAdmissionBlocksCommandsAndConcurrentConnect(t *testing.T) {
 	if err := c.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() after Connect error = %v", err)
 	}
-	tr.events <- transport.Event{Kind: transport.EventRX, When: time.Now(), Text: "ok"}
+	tr.events <- transport.Event{Kind: transport.EventRX, Generation: 1, When: time.Now(), Text: "ok"}
 	waitForState(t, c, func(state State) bool { return state.ProgramStatus == ProgramCompleted })
 	if err := c.Connect(context.Background(), transport.DefaultPortConfig("again")); !errors.Is(err, ErrAlreadyConnected) {
 		t.Fatalf("second stable Connect() error = %v, want ErrAlreadyConnected", err)

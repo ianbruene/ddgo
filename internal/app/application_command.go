@@ -8,6 +8,7 @@ import (
 
 	"github.com/ianbruene/ddgo/internal/gcode"
 	"github.com/ianbruene/ddgo/internal/macro"
+	"github.com/ianbruene/ddgo/internal/transport"
 )
 
 func parseConsoleGCodeLine(text string) (gcode.Line, bool) {
@@ -79,7 +80,10 @@ func (c *Controller) acquireResponseOwnerLocked(kind responseOwnerKind, session 
 	if err := c.admissionErrorLocked(request); err != nil {
 		return err
 	}
-	c.responseOwner = responseOwner{kind: kind, session: session}
+	if c.connectionGeneration == 0 {
+		return transport.ErrNotOpen
+	}
+	c.responseOwner = responseOwner{kind: kind, session: session, generation: c.connectionGeneration}
 	return nil
 }
 
@@ -188,12 +192,17 @@ func (s *responseSession) Err() error {
 }
 
 func (c *Controller) terminateInteractiveSessionLocked(session *responseSession, cause error) bool {
-	return c.terminateResponseOwnerLocked(responseOwner{kind: responseOwnerInteractiveMacro, session: session}, cause)
+	if c.responseOwner.kind != responseOwnerInteractiveMacro || c.responseOwner.session != session {
+		return false
+	}
+	return c.terminateResponseOwnerLocked(c.responseOwner, cause)
 }
 
 func (c *Controller) endInteractiveSession(session *responseSession, cause error) {
 	c.mu.Lock()
-	c.terminateResponseOwnerLocked(responseOwner{kind: responseOwnerInteractiveMacro, session: session}, cause)
+	if c.responseOwner.kind == responseOwnerInteractiveMacro && c.responseOwner.session == session {
+		c.terminateResponseOwnerLocked(c.responseOwner, cause)
+	}
 	c.mu.Unlock()
 }
 
