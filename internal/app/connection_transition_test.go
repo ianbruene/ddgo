@@ -80,7 +80,15 @@ func TestConnectAttemptInvalidatedByDisconnectBeforeCommit(t *testing.T) {
 	tr.events <- transport.Event{Kind: transport.EventDisconnected, Generation: 1, When: time.Now()}
 	// Open has not returned its physical generation yet. The bridge records the
 	// disconnect and Connect correlates it synchronously after Open returns.
-	runtime.Gosched()
+	for {
+		c.mu.RLock()
+		_, recorded := c.pendingDisconnectedGenerations[1]
+		c.mu.RUnlock()
+		if recorded {
+			break
+		}
+		runtime.Gosched()
+	}
 	close(tr.releaseOpen)
 	if err := <-done; !errors.Is(err, ErrTransportDisconnected) {
 		t.Fatalf("Connect() error = %v, want ErrTransportDisconnected", err)
