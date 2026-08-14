@@ -286,6 +286,9 @@ jobs:
           New-Item -ItemType Directory -Path dist\check | Out-Null
           Expand-Archive -Path dist\DDGo-windows-amd64.zip -DestinationPath dist\check -Force
           .\scripts\verify-windows-dist.ps1 -DistDir dist\check\DDGo
+      - name: Verify Windows installer policy
+        shell: pwsh
+        run: .\scripts\verify-windows-installer-policy.ps1
       - name: Build Windows installer
         shell: pwsh
         run: |
@@ -385,6 +388,8 @@ jobs:
             ### Windows
 
             `DDGo-windows-amd64-setup.exe` is the recommended Windows installer.
+
+            Requires Windows 10 or later on a 64-bit/x64-compatible system. Windows 7 and Windows 8/8.1 are not supported. Extracting the portable ZIP on an older operating system does not make that system supported.
 
             `DDGo-windows-amd64.zip` is also provided as a portable/debug package. If using the ZIP, extract the whole `DDGo` folder before running `DDGo.exe`.
           files: |

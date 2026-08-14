@@ -4,6 +4,7 @@ This project ships GUI desktop artifacts built with `-tags 'miqt serial'`.
 
 ## Release policy
 
+- Minimum supported Windows: Windows 10, 64-bit
 - Minimum supported macOS: `15.0`
 - Linux release artifact: `DDGo-linux-amd64.tar.gz`
 - macOS release artifact: `DDGo-macos-universal.dmg`
@@ -96,6 +97,8 @@ The universal macOS app is built by packaging separate `arm64` and `x86_64` app 
 `package-macos.sh` sets `CFBundleExecutable=ddgo`, sets `LSMinimumSystemVersion` in `Info.plist`, bundles Qt frameworks/plugins with `macdeployqt`, and signs the app.
 
 ## Windows (MSYS2 / MinGW)
+
+DDGo Windows releases target Windows 10 or later on 64-bit/x64-compatible systems. Windows 7 and Windows 8/8.1 are unsupported. The installer enforces this support floor with Inno Setup `MinVersion=10.0`, and Windows release artifacts are amd64/x64-compatible. The portable ZIP has the same operating-system requirement; extracting it on an older Windows version does not make that version supported.
 
 1. Install packages in an MSYS2 MINGW64 shell:
    `pacman -S --needed mingw-w64-x86_64-go mingw-w64-x86_64-gcc mingw-w64-x86_64-qt5-base mingw-w64-x86_64-pkgconf zip`
