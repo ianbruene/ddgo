@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,7 +17,7 @@ import (
 	qt "github.com/mappu/miqt/qt"
 )
 
-type Window struct {
+type MainWindow struct {
 	controller *app.Controller
 
 	window *qt.QMainWindow
@@ -74,27 +73,16 @@ type Window struct {
 	programStatus     *qt.QLabel
 	programProgress   *qt.QLabel
 	lastErrorLabel    *qt.QLabel
-	pollTimer         *qt.QTimer
 }
 
-func Run(controller *app.Controller) error {
-	qt.NewQApplication(os.Args)
-	w := newWindow(controller)
-	w.window.Show()
-	go func() { _ = controller.RefreshPorts(context.Background()) }()
-	qt.QApplication_Exec()
-	return nil
-}
-
-func newWindow(controller *app.Controller) *Window {
-	w := &Window{controller: controller}
+func newMainWindow(controller *app.Controller) *MainWindow {
+	w := &MainWindow{controller: controller}
 	w.build()
 	w.bind()
-	w.applyState(controller.Snapshot())
 	return w
 }
 
-func (w *Window) build() {
+func (w *MainWindow) build() {
 	w.window = qt.NewQMainWindow(nil)
 	w.window.SetWindowTitle("DDGo")
 	w.window.Resize(1180, 640)
@@ -340,12 +328,9 @@ func (w *Window) build() {
 	spindleGroup.Layout().AddWidget(w.spindleReported.QWidget)
 	rightLayout.AddStretch()
 
-	w.pollTimer = qt.NewQTimer()
-	w.pollTimer.OnTimeout(func() { w.drainEvents() })
-	w.pollTimer.Start(50)
 }
 
-func (w *Window) bind() {
+func (w *MainWindow) bind() {
 	w.sendButton.OnClicked(func() { w.sendCommand() })
 	w.commandEntry.OnReturnPressed(func() { w.sendCommand() })
 	w.refreshButton.OnClicked(func() {
@@ -391,7 +376,7 @@ func (w *Window) bind() {
 	w.spindleStopButton.OnClicked(func() { go func() { _ = w.controller.StopSpindle(context.Background()) }() })
 }
 
-func (w *Window) toggleConnection() {
+func (w *MainWindow) toggleConnection() {
 	state := w.controller.Snapshot()
 	if state.Connected {
 		go func() { _ = w.controller.Disconnect() }()
@@ -401,7 +386,7 @@ func (w *Window) toggleConnection() {
 	go func() { _ = w.controller.Connect(context.Background(), cfg) }()
 }
 
-func (w *Window) browseAndLoadProgram() {
+func (w *MainWindow) browseAndLoadProgram() {
 	dialog := qt.NewQFileDialog(w.window.QWidget)
 	dialog.SetWindowTitle("Open G-code Program")
 	dialog.SetFileMode(qt.QFileDialog__ExistingFile)
@@ -419,11 +404,11 @@ func (w *Window) browseAndLoadProgram() {
 	go func() { _ = w.controller.LoadProgramFile(path) }()
 }
 
-func (w *Window) startProgram() {
+func (w *MainWindow) startProgram() {
 	go func() { _ = w.controller.StartProgram(context.Background()) }()
 }
 
-func (w *Window) sendCommand() {
+func (w *MainWindow) sendCommand() {
 	line := strings.TrimSpace(w.commandEntry.Text())
 	if line == "" {
 		return
@@ -432,7 +417,7 @@ func (w *Window) sendCommand() {
 	go func() { _ = w.controller.SendConsoleLine(context.Background(), line) }()
 }
 
-func (w *Window) jog(axis string, direction float64) {
+func (w *MainWindow) jog(axis string, direction float64) {
 	step, err := strconv.ParseFloat(strings.TrimSpace(w.stepCombo.CurrentText()), 64)
 	if err != nil {
 		w.appendConsole("ERR", fmt.Sprintf("invalid step: %v", err))
@@ -446,7 +431,7 @@ func (w *Window) jog(axis string, direction float64) {
 	go func() { _ = w.controller.Jog(context.Background(), axis, step*direction, feed) }()
 }
 
-func (w *Window) jogToEnd(axis string, direction float64) {
+func (w *MainWindow) jogToEnd(axis string, direction float64) {
 	feed, ok := w.parsePositiveFloat(w.feedCombo.CurrentText(), "feed")
 	if !ok {
 		return
@@ -476,7 +461,7 @@ func (w *Window) jogToEnd(axis string, direction float64) {
 	go func() { _ = w.controller.JogTo(context.Background(), axis, target, feed) }()
 }
 
-func (w *Window) parsePositiveFloat(text, name string) (float64, bool) {
+func (w *MainWindow) parsePositiveFloat(text, name string) (float64, bool) {
 	value, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
 	if err != nil {
 		w.appendConsole("ERR", fmt.Sprintf("invalid %s: %v", name, err))
@@ -489,7 +474,7 @@ func (w *Window) parsePositiveFloat(text, name string) (float64, bool) {
 	return value, true
 }
 
-func (w *Window) axisTravel(axis string) (float64, bool) {
+func (w *MainWindow) axisTravel(axis string) (float64, bool) {
 	switch strings.ToUpper(strings.TrimSpace(axis)) {
 	case "X":
 		return w.parsePositiveFloat(w.xTravel.Text(), "X travel")
@@ -516,22 +501,11 @@ func axisIndex(axis string) int {
 	}
 }
 
-func (w *Window) action(action grbl.Action) {
+func (w *MainWindow) action(action grbl.Action) {
 	go func() { _ = w.controller.Action(context.Background(), action) }()
 }
 
-func (w *Window) drainEvents() {
-	for {
-		select {
-		case ev := <-w.controller.Events():
-			w.applyEvent(ev)
-		default:
-			return
-		}
-	}
-}
-
-func (w *Window) applyEvent(ev app.Event) {
+func (w *MainWindow) applyEvent(ev app.Event) {
 	w.applyState(ev.State)
 	switch ev.Kind {
 	case app.EventConsoleTX:
@@ -549,7 +523,7 @@ func (w *Window) applyEvent(ev app.Event) {
 	}
 }
 
-func (w *Window) populatePorts(list []ports.Info) {
+func (w *MainWindow) populatePorts(list []ports.Info) {
 	w.portCombo.Clear()
 	names := make([]string, 0, len(list))
 	for _, p := range list {
@@ -561,7 +535,7 @@ func (w *Window) populatePorts(list []ports.Info) {
 	}
 }
 
-func (w *Window) applyState(state app.State) {
+func (w *MainWindow) applyState(state app.State) {
 	if state.Connected {
 		w.connStatus.SetText(fmt.Sprintf("Connection: connected (%s)", state.PortName))
 		w.connectButton.SetText("Disconnect")
@@ -639,7 +613,7 @@ func (w *Window) applyState(state app.State) {
 	}
 }
 
-func (w *Window) appendConsole(prefix string, text string) {
+func (w *MainWindow) appendConsole(prefix string, text string) {
 	w.console.AppendPlainText(fmt.Sprintf("[%s] %s", prefix, text))
 }
 
