@@ -506,7 +506,6 @@ func (w *MainWindow) action(action grbl.Action) {
 }
 
 func (w *MainWindow) applyEvent(ev app.Event) {
-	w.applyState(ev.State)
 	switch ev.Kind {
 	case app.EventConsoleTX:
 		w.appendConsole("TX", ev.Text)
