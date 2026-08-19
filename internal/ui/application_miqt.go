@@ -17,7 +17,7 @@ type Application struct {
 
 	mainWindow *MainWindow
 	pollTimer  *qt.QTimer
-	views      viewRegistry
+	dispatcher viewDispatcher
 }
 
 func newApplication(controller *app.Controller) *Application {
@@ -32,6 +32,7 @@ func Run(controller *app.Controller) error {
 func (a *Application) Run() error {
 	qt.NewQApplication(os.Args)
 
+	a.dispatcher.state = a.controller.Snapshot()
 	a.mainWindow = newMainWindow(a.controller)
 	a.registerView(a.mainWindow)
 	a.mainWindow.window.Show()
@@ -46,20 +47,18 @@ func (a *Application) Run() error {
 }
 
 func (a *Application) registerView(view eventView) viewID {
-	id := a.views.add(view)
-	view.applyState(a.controller.Snapshot())
-	return id
+	return a.dispatcher.register(view)
 }
 
 func (a *Application) unregisterView(id viewID) {
-	a.views.remove(id)
+	a.dispatcher.unregister(id)
 }
 
 func (a *Application) drainControllerEvents() {
 	for {
 		select {
 		case event := <-a.controller.Events():
-			a.views.applyEvent(event)
+			a.dispatcher.dispatch(event)
 		default:
 			return
 		}

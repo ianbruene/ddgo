@@ -2,11 +2,40 @@ package ui
 
 import "github.com/ianbruene/ddgo/internal/app"
 
-// eventView is a UI surface which presents controller state and events.
-// Implementations may be backed by any UI toolkit; the registry deliberately is not.
+// eventView is a UI surface that presents application state and reacts to
+// application events. Implementations may be backed by any UI toolkit; the
+// registry deliberately is not.
+//
+// applyState renders the latest controller/application state.
+//
+// applyEvent handles event-specific behavior only. Application dispatches
+// event.State through applyState before invoking applyEvent.
 type eventView interface {
 	applyState(app.State)
 	applyEvent(app.Event)
+}
+
+// viewDispatcher owns the state that has entered the UI event stream and
+// distributes state and event-specific behavior to every registered view.
+type viewDispatcher struct {
+	state app.State
+	views viewRegistry
+}
+
+func (d *viewDispatcher) register(view eventView) viewID {
+	id := d.views.add(view)
+	view.applyState(d.state)
+	return id
+}
+
+func (d *viewDispatcher) unregister(id viewID) {
+	d.views.remove(id)
+}
+
+func (d *viewDispatcher) dispatch(event app.Event) {
+	d.state = event.State
+	d.views.applyState(event.State)
+	d.views.applyEvent(event)
 }
 
 type viewID uint64
