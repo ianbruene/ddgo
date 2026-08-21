@@ -197,6 +197,7 @@ func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T)
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
+	drainEvents(controller.Events())
 
 	fake.InjectDisconnected()
 	state := waitForState(t, controller, func(s State) bool {
@@ -206,7 +207,12 @@ func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T)
 	if state.ProgramComplete != 0 {
 		t.Fatalf("ProgramComplete = %d, want 0", state.ProgramComplete)
 	}
-	requireControllerErrorEventContaining(t, controller.Events(), "transport disconnected")
+	stateEvent := waitForEventText(t, controller.Events(), EventStateChanged, "transport disconnected")
+	errorEvent := waitForEvent(t, controller.Events(), EventError)
+	requireSameStateRevision(t, stateEvent, errorEvent)
+	if !reflect.DeepEqual(stateEvent.State, errorEvent.State) {
+		t.Fatalf("disconnect event states differ: state=%+v error=%+v", stateEvent.State, errorEvent.State)
+	}
 }
 
 func TestControllerReconnectsAfterTransportDisconnected(t *testing.T) {
@@ -335,6 +341,7 @@ func TestControllerConnectSendJogActionAndReceive(t *testing.T) {
 	}
 
 	stateChanged := waitForEvent(t, controller.Events(), EventStateChanged)
+	requireStateRevision(t, stateChanged)
 	if got, want := stateChanged.Text, "connected to /dev/ttyACM0"; got != want {
 		t.Fatalf("state change text = %q, want %q", got, want)
 	}
@@ -350,6 +357,8 @@ func TestControllerConnectSendJogActionAndReceive(t *testing.T) {
 	if err := controller.SendConsoleLine(context.Background(), "G0 X10"); err != nil {
 		t.Fatalf("SendConsoleLine() error = %v", err)
 	}
+	tx := waitForEvent(t, controller.Events(), EventConsoleTX)
+	requireStateRevision(t, tx)
 	fake.InjectRX("ok")
 	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := controller.Jog(context.Background(), "X", 1.5, 250); err != nil {
@@ -363,12 +372,20 @@ func TestControllerConnectSendJogActionAndReceive(t *testing.T) {
 
 	fake.InjectRX("<Idle|MPos:0.000,0.000,0.000>")
 	rx := waitForEvent(t, controller.Events(), EventConsoleRX)
+	rxRevision := requireStateRevision(t, rx)
 	if got, want := rx.Text, "<Idle|MPos:0.000,0.000,0.000>"; got != want {
 		t.Fatalf("rx text = %q, want %q", got, want)
 	}
 
 	if got, want := controller.Snapshot().MachineState, "Idle"; got != want {
 		t.Fatalf("MachineState = %q, want %q", got, want)
+	}
+	if !rx.State.HasMachinePosition || rx.State.MachineState != "Idle" {
+		t.Fatalf("status event state = %+v, want parsed Idle machine position", rx.State)
+	}
+	_, snapshotRevision := controller.SnapshotWithRevision()
+	if snapshotRevision < rxRevision {
+		t.Fatalf("snapshot revision = %d, want at least status event revision %d", snapshotRevision, rxRevision)
 	}
 
 	written := fake.Written()
@@ -734,6 +751,7 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	startEv := waitForEvent(t, controller.Events(), EventStateChanged)
+	startRevision := requireStateRevision(t, startEv)
 	if got, want := startEv.State.ProgramStatus, ProgramRunning; got != want {
 		t.Fatalf("start status = %q, want %q", got, want)
 	}
@@ -755,7 +773,14 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramRunning })
+	progressEv := waitForEvent(t, controller.Events(), EventStateChanged)
+	progressRevision := requireStateRevision(t, progressEv)
+	if progressEv.State.ProgramComplete != 1 {
+		t.Fatalf("progress complete = %d, want 1", progressEv.State.ProgramComplete)
+	}
+	if progressRevision <= startRevision {
+		t.Fatalf("progress revision = %d, want greater than start revision %d", progressRevision, startRevision)
+	}
 	written = fake.Written()
 	if got, want := written[1].Display, "G0 X1"; got != want {
 		t.Fatalf("second written display = %q, want %q", got, want)
@@ -772,6 +797,10 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 3 && s.ProgramStatus == ProgramCompleted })
 	completeEv := waitForEventText(t, controller.Events(), EventStateChanged, "program demo.gcode completed")
+	completeRevision := requireStateRevision(t, completeEv)
+	if completeRevision <= progressRevision {
+		t.Fatalf("completion revision = %d, want greater than progress revision %d", completeRevision, progressRevision)
+	}
 	if got, want := completeEv.State.ProgramStatus, ProgramCompleted; got != want {
 		t.Fatalf("complete status = %q, want %q", got, want)
 	}
@@ -866,7 +895,15 @@ func TestControllerProgramFailureDisablesContourPreservesPoints(t *testing.T) {
 	if got, want := state.LastError, "program failed at line 1: error:2"; got != want {
 		t.Fatalf("LastError = %q, want %q", got, want)
 	}
+	stateEv := waitForEventText(t, controller.Events(), EventStateChanged, "program failed")
 	errEv := waitForEvent(t, controller.Events(), EventError)
+	requireSameStateRevision(t, stateEv, errEv)
+	if !reflect.DeepEqual(stateEv.State, errEv.State) {
+		t.Fatalf("program failure event states differ: state=%+v error=%+v", stateEv.State, errEv.State)
+	}
+	if stateEv.State.ProgramStatus != ProgramFailed || stateEv.State.LastError != "program failed at line 1: error:2" {
+		t.Fatalf("program failure event state = %+v", stateEv.State)
+	}
 	if got, want := errEv.Text, "program failed at line 1: error:2"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}

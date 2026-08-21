@@ -9,6 +9,23 @@ import (
 	"github.com/ianbruene/ddgo/internal/ports"
 )
 
+func requireStateRevision(t *testing.T, event Event) StateRevision {
+	t.Helper()
+	if event.StateRevision == 0 {
+		t.Fatalf("%s event has zero StateRevision", event.Kind)
+	}
+	return event.StateRevision
+}
+
+func requireSameStateRevision(t *testing.T, first, second Event) {
+	t.Helper()
+	firstRevision := requireStateRevision(t, first)
+	secondRevision := requireStateRevision(t, second)
+	if firstRevision != secondRevision {
+		t.Fatalf("revisions differ: %d vs %d", firstRevision, secondRevision)
+	}
+}
+
 func TestCaptureEventStateRevisionAndSnapshotWithRevision(t *testing.T) {
 	t.Parallel()
 
@@ -42,13 +59,12 @@ func TestStandaloneControllerEventsCarryStateRevisions(t *testing.T) {
 		t.Fatalf("RefreshPorts() error = %v", err)
 	}
 	portEvent := <-c.events
-	if portEvent.StateRevision == 0 {
-		t.Fatal("ports event has no state revision")
-	}
+	portRevision := requireStateRevision(t, portEvent)
 
 	c.emitError(errors.New("test error"))
 	errorEvent := <-c.events
-	if errorEvent.StateRevision <= portEvent.StateRevision {
-		t.Fatalf("error revision = %d, want greater than ports revision %d", errorEvent.StateRevision, portEvent.StateRevision)
+	errorRevision := requireStateRevision(t, errorEvent)
+	if errorRevision <= portRevision {
+		t.Fatalf("error revision = %d, want greater than ports revision %d", errorRevision, portRevision)
 	}
 }
