@@ -88,6 +88,7 @@ type Controller struct {
 	listPorts                               ports.ListFunc
 	events                                  chan Event
 	state                                   State
+	stateRevision                           StateRevision
 	loaded                                  gcode.Program
 	run                                     *programRun
 	responseOwner                           responseOwner
@@ -150,6 +151,31 @@ func (c *Controller) Snapshot() State {
 	return c.state
 }
 
+func (c *Controller) SnapshotWithRevision() (State, StateRevision) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.state, c.stateRevision
+}
+
+type versionedState struct {
+	state    State
+	revision StateRevision
+}
+
+// captureEventStateLocked captures a snapshot intended for an event. The
+// caller must hold c.mu for writing so state and its ordering revision are
+// serialized at the same point.
+func (c *Controller) captureEventStateLocked() versionedState {
+	c.stateRevision++
+	return versionedState{state: c.state, revision: c.stateRevision}
+}
+
+func (c *Controller) captureEventState() versionedState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.captureEventStateLocked()
+}
+
 func (c *Controller) RefreshPorts(ctx context.Context) error {
 	if c.listPorts == nil {
 		err := errors.New("port lister is not configured")
@@ -161,7 +187,8 @@ func (c *Controller) RefreshPorts(ctx context.Context) error {
 		c.emitError(err)
 		return err
 	}
-	c.events <- Event{Kind: EventPortsRefreshed, When: time.Now(), Ports: clonePorts(list), State: c.Snapshot()}
+	snapshot := c.captureEventState()
+	c.events <- Event{Kind: EventPortsRefreshed, When: time.Now(), Ports: clonePorts(list), State: snapshot.state, StateRevision: snapshot.revision}
 	return nil
 }
 
@@ -213,11 +240,11 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 	c.state.PortName = cfg.Name
 	c.state.LastError = ""
 	c.finishConnectAttemptLocked(attempt)
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.startStatusPollingLocked()
 	c.mu.Unlock()
 
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: fmt.Sprintf("connected to %s", cfg.Name)}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: fmt.Sprintf("connected to %s", cfg.Name)}
 	return nil
 }
 
@@ -274,10 +301,10 @@ func (c *Controller) Disconnect() error {
 	c.mu.Lock()
 	c.clearConnectionStateLocked()
 	c.connectionTransition = connectionStable
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
 
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "disconnected"}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: "disconnected"}
 	return nil
 }
 
@@ -644,9 +671,9 @@ func (c *Controller) LoadProgramFile(path string) error {
 	c.state.ProgramTotal = len(prog.Lines)
 	c.state.ProgramComplete = 0
 	c.state.LastError = ""
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: fmt.Sprintf("loaded program %s (%d lines)", prog.Name, len(prog.Lines))}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: fmt.Sprintf("loaded program %s (%d lines)", prog.Name, len(prog.Lines))}
 	return nil
 }
 
@@ -704,10 +731,10 @@ func (c *Controller) StartProgram(ctx context.Context) error {
 	c.state.ProgramComplete = 0
 	c.state.LastError = ""
 	c.contour.Disable()
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
 
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: fmt.Sprintf("started program %s", run.program.Name)}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: fmt.Sprintf("started program %s", run.program.Name)}
 	go c.runProgram(runCtx, run)
 	return nil
 }
@@ -731,9 +758,9 @@ func (c *Controller) PauseProgram(ctx context.Context) error {
 		return nil
 	}
 	c.state.ProgramStatus = ProgramPaused
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program paused"}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: "program paused"}
 	return nil
 }
 
@@ -756,9 +783,9 @@ func (c *Controller) ResumeProgram(ctx context.Context) error {
 		return nil
 	}
 	c.state.ProgramStatus = ProgramRunning
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program resumed"}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: "program resumed"}
 	return nil
 }
 
@@ -779,7 +806,7 @@ func (c *Controller) StopProgram(ctx context.Context) error {
 	c.run = nil
 	c.releaseResponseOwnerLocked(responseOwnerProgram, run.responseSession())
 	c.state.ProgramStatus = ProgramStopped
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
 	defer c.endRealtimeWrite()
 
@@ -791,7 +818,7 @@ func (c *Controller) StopProgram(ctx context.Context) error {
 	if err := c.writeProgramActionReserved(ctx, grbl.ActionSoftReset); err != nil && firstErr == nil {
 		firstErr = err
 	}
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program stopped"}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: "program stopped"}
 	return firstErr
 }
 
@@ -959,9 +986,9 @@ func (c *Controller) updateProgramProgress(run *programRun, complete int) {
 		return
 	}
 	c.state.ProgramComplete = complete
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision}
 }
 
 func (c *Controller) finishProgramSuccess(run *programRun) {
@@ -974,9 +1001,9 @@ func (c *Controller) finishProgramSuccess(run *programRun) {
 	c.releaseResponseOwnerLocked(responseOwnerProgram, run.responseSession())
 	c.state.ProgramStatus = ProgramCompleted
 	c.state.ProgramComplete = c.state.ProgramTotal
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: fmt.Sprintf("program %s completed", run.program.Name)}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: fmt.Sprintf("program %s completed", run.program.Name)}
 }
 
 func (c *Controller) finishProgramFailure(run *programRun, err error) {
@@ -995,13 +1022,13 @@ func (c *Controller) finishProgramFailure(run *programRun, err error) {
 	c.state.LastError = err.Error()
 	c.contour.Disable()
 	cancel = run.cancel
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: "program failed"}
-	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
+	c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: "program failed"}
+	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: snapshot.state, StateRevision: snapshot.revision}
 }
 
 func (c *Controller) handleTransportDisconnected(generation transport.ConnectionGeneration) {
@@ -1027,17 +1054,22 @@ func (c *Controller) handleTransportDisconnected(generation transport.Connection
 	owner := c.responseOwner
 	c.terminateResponseOwnerLocked(owner, err)
 	changed := c.clearConnectionStateLocked()
-	state := c.state
+	emitState := changed || run != nil || owner.kind != responseOwnerNone
+	emitError := run != nil || owner.kind != responseOwnerNone
+	var snapshot versionedState
+	if emitState || emitError {
+		snapshot = c.captureEventStateLocked()
+	}
 	c.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
-	if changed || run != nil || owner.kind != responseOwnerNone {
-		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: state, Text: err.Error()}
+	if emitState {
+		c.events <- Event{Kind: EventStateChanged, When: time.Now(), State: snapshot.state, StateRevision: snapshot.revision, Text: err.Error()}
 	}
-	if run != nil || owner.kind != responseOwnerNone {
-		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
+	if emitError {
+		c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: snapshot.state, StateRevision: snapshot.revision}
 	}
 }
 
@@ -1179,16 +1211,19 @@ func (c *Controller) runTransportEventBridge() {
 			}
 			c.handleTransportDisconnected(ev.Generation)
 		case transport.EventTX:
-			c.mu.RLock()
+			c.mu.Lock()
 			accepted := c.acceptsTransportEventLocked(ev)
-			snapshot := c.state
-			c.mu.RUnlock()
 			if !accepted {
+				c.mu.Unlock()
 				continue
 			}
-			if !ev.SuppressLog {
-				c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot, Raw: ev}
+			if ev.SuppressLog {
+				c.mu.Unlock()
+				continue
 			}
+			snapshot := c.captureEventStateLocked()
+			c.mu.Unlock()
+			c.events <- Event{Kind: EventConsoleTX, When: ev.When, Text: ev.Text, State: snapshot.state, StateRevision: snapshot.revision, Raw: ev}
 		case transport.EventRX:
 			c.mu.Lock()
 			if !c.acceptsTransportEventLocked(ev) {
@@ -1222,13 +1257,16 @@ func (c *Controller) runTransportEventBridge() {
 				}
 			}
 			overflowRun := c.deliverResponseLocked(ev.Generation, ev.Text)
-			state := c.state
+			var snapshot versionedState
+			if !suppressRXLog {
+				snapshot = c.captureEventStateLocked()
+			}
 			c.mu.Unlock()
 			if overflowRun != nil {
 				c.finishProgramFailure(overflowRun, errors.New("program response backlog full"))
 			}
 			if !suppressRXLog {
-				c.events <- Event{Kind: EventConsoleRX, When: ev.When, Text: ev.Text, State: state, Raw: ev}
+				c.events <- Event{Kind: EventConsoleRX, When: ev.When, Text: ev.Text, State: snapshot.state, StateRevision: snapshot.revision, Raw: ev}
 			}
 		case transport.EventError:
 			c.mu.RLock()
@@ -1342,9 +1380,9 @@ func (c *Controller) emitError(err error) {
 	}
 	c.mu.Lock()
 	c.state.LastError = err.Error()
-	state := c.state
+	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()
-	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: state}
+	c.events <- Event{Kind: EventError, When: time.Now(), Err: err, Text: err.Error(), State: snapshot.state, StateRevision: snapshot.revision}
 }
 
 func isProgramResponse(line string) bool {

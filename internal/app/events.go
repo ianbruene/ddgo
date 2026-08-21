@@ -9,6 +9,8 @@ import (
 
 type EventKind string
 
+type StateRevision uint64
+
 type ProgramStatus string
 
 const (
@@ -61,11 +63,12 @@ type State struct {
 }
 
 type Event struct {
-	Kind  EventKind
-	When  time.Time
-	Text  string
-	Err   error
-	State State
-	Ports []ports.Info
-	Raw   transport.Event
+	Kind          EventKind
+	When          time.Time
+	Text          string
+	Err           error
+	State         State
+	StateRevision StateRevision
+	Ports         []ports.Info
+	Raw           transport.Event
 }

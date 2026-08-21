@@ -32,7 +32,9 @@ func Run(controller *app.Controller) error {
 func (a *Application) Run() error {
 	qt.NewQApplication(os.Args)
 
-	a.dispatcher.state = a.controller.Snapshot()
+	state, revision := a.controller.SnapshotWithRevision()
+	a.dispatcher.state = state
+	a.dispatcher.revision = revision
 	a.mainWindow = newMainWindow(a.controller)
 	a.registerView(a.mainWindow)
 	a.mainWindow.window.Show()
