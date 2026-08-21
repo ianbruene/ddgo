@@ -6,10 +6,11 @@ import "github.com/ianbruene/ddgo/internal/app"
 // application events. Implementations may be backed by any UI toolkit; the
 // registry deliberately is not.
 //
-// applyState renders the latest controller/application state.
+// applyState renders the newest controller state accepted by the UI
+// dispatcher. Older event snapshots may be ignored.
 //
-// applyEvent handles event-specific behavior only. Application dispatches
-// event.State through applyState before invoking applyEvent.
+// applyEvent handles event-specific behavior. Every event is delivered even
+// when its attached State snapshot is older than the state already presented.
 type eventView interface {
 	applyState(app.State)
 	applyEvent(app.Event)
@@ -18,8 +19,9 @@ type eventView interface {
 // viewDispatcher owns the state that has entered the UI event stream and
 // distributes state and event-specific behavior to every registered view.
 type viewDispatcher struct {
-	state app.State
-	views viewRegistry
+	state    app.State
+	revision app.StateRevision
+	views    viewRegistry
 }
 
 func (d *viewDispatcher) register(view eventView) viewID {
@@ -33,8 +35,11 @@ func (d *viewDispatcher) unregister(id viewID) {
 }
 
 func (d *viewDispatcher) dispatch(event app.Event) {
-	d.state = event.State
-	d.views.applyState(event.State)
+	if event.StateRevision > d.revision {
+		d.state = event.State
+		d.revision = event.StateRevision
+		d.views.applyState(event.State)
+	}
 	d.views.applyEvent(event)
 }
 
