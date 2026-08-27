@@ -18,7 +18,10 @@ import (
 )
 
 type MainWindow struct {
-	controller *app.Controller
+	controller    *app.Controller
+	onNewWindow   func()
+	onClose       func()
+	closeNotified bool
 
 	window *qt.QMainWindow
 
@@ -75,8 +78,8 @@ type MainWindow struct {
 	lastErrorLabel    *qt.QLabel
 }
 
-func newMainWindow(controller *app.Controller) *MainWindow {
-	w := &MainWindow{controller: controller}
+func newMainWindow(controller *app.Controller, onNewWindow func()) *MainWindow {
+	w := &MainWindow{controller: controller, onNewWindow: onNewWindow}
 	w.build()
 	w.bind()
 	return w
@@ -86,6 +89,22 @@ func (w *MainWindow) build() {
 	w.window = qt.NewQMainWindow(nil)
 	w.window.SetWindowTitle("DDGo")
 	w.window.Resize(1180, 640)
+	fileMenu := w.window.MenuBar().AddMenuWithTitle("File")
+	newWindowAction := fileMenu.AddAction("New Window temp")
+	newWindowAction.OnTriggered(func() {
+		if w.onNewWindow != nil {
+			w.onNewWindow()
+		}
+	})
+	w.window.OnCloseEvent(func(super func(*qt.QCloseEvent), event *qt.QCloseEvent) {
+		super(event)
+		if event.IsAccepted() && !w.closeNotified {
+			w.closeNotified = true
+			if w.onClose != nil {
+				w.onClose()
+			}
+		}
+	})
 
 	central := qt.NewQWidget(nil)
 	central.SetLayout(qt.NewQHBoxLayout(nil).QLayout)
@@ -329,6 +348,10 @@ func (w *MainWindow) build() {
 	rightLayout.AddStretch()
 
 }
+
+func (w *MainWindow) show() { w.window.Show() }
+
+func (w *MainWindow) setOnClose(fn func()) { w.onClose = fn }
 
 func (w *MainWindow) bind() {
 	w.sendButton.OnClicked(func() { w.sendCommand() })
