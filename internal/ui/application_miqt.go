@@ -15,13 +15,15 @@ import (
 type Application struct {
 	controller *app.Controller
 
-	mainWindow *MainWindow
 	pollTimer  *qt.QTimer
 	dispatcher viewDispatcher
+	windows    windowManager
 }
 
 func newApplication(controller *app.Controller) *Application {
-	return &Application{controller: controller}
+	a := &Application{controller: controller}
+	a.windows.dispatcher = &a.dispatcher
+	return a
 }
 
 // Run creates and runs the UI application.
@@ -35,9 +37,9 @@ func (a *Application) Run() error {
 	state, revision := a.controller.SnapshotWithRevision()
 	a.dispatcher.state = state
 	a.dispatcher.revision = revision
-	a.mainWindow = newMainWindow(a.controller)
-	a.registerView(a.mainWindow)
-	a.mainWindow.window.Show()
+	mainWindow := newMainWindow(a.controller, func() { a.openBlankWindow() })
+	a.windows.add(mainWindow)
+	mainWindow.show()
 
 	a.pollTimer = qt.NewQTimer()
 	a.pollTimer.OnTimeout(func() { a.drainControllerEvents() })
@@ -48,12 +50,10 @@ func (a *Application) Run() error {
 	return nil
 }
 
-func (a *Application) registerView(view eventView) viewID {
-	return a.dispatcher.register(view)
-}
-
-func (a *Application) unregisterView(id viewID) {
-	a.dispatcher.unregister(id)
+func (a *Application) openBlankWindow() {
+	window := newBlankWindow(func() { a.openBlankWindow() })
+	a.windows.add(window)
+	window.show()
 }
 
 func (a *Application) drainControllerEvents() {
