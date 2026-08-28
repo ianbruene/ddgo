@@ -89,6 +89,7 @@ func (w *MainWindow) build() {
 	w.window = qt.NewQMainWindow(nil)
 	w.window.SetWindowTitle("DDGo")
 	w.window.Resize(1180, 640)
+	w.window.SetAttribute(qt.WA_DeleteOnClose)
 	fileMenu := w.window.MenuBar().AddMenuWithTitle("File")
 	newWindowAction := fileMenu.AddAction("New Window temp")
 	newWindowAction.OnTriggered(func() {
