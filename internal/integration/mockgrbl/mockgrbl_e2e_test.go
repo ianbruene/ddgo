@@ -38,13 +38,15 @@ type mockProcess struct {
 }
 
 type mockState struct {
-	State              string      `json:"state"`
-	MachinePosition    [3]float64  `json:"machine_position"`
-	ActiveMove         interface{} `json:"active_move"`
-	QueuedCommandCount int         `json:"queued_command_count"`
-	FreePlannerBlocks  int         `json:"free_planner_blocks"`
-	QueueCapacity      int         `json:"queue_capacity"`
-	LastErrorAlarm     string      `json:"last_error_alarm"`
+	State           string     `json:"state"`
+	MachinePosition [3]float64 `json:"machine_position"`
+	ActiveMove      *struct {
+		Progress float64 `json:"progress"`
+	} `json:"active_move"`
+	QueuedCommandCount int    `json:"queued_command_count"`
+	FreePlannerBlocks  int    `json:"free_planner_blocks"`
+	QueueCapacity      int    `json:"queue_capacity"`
+	LastErrorAlarm     string `json:"last_error_alarm"`
 }
 
 type mockLogEntry struct {
@@ -2117,24 +2119,27 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 
-	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "$J=G53 G90 X-10 F600\n$G\nM5\n")
+	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "$J=G53 G90 X-10 F150\n$G\nM5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("load barrier program: %v", err)
 	}
 	eventsAfter := mockEventCount(t, m)
 	responsesAfter := mockResponseCount(t, m)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := controller.StartProgram(ctx); err != nil {
 		t.Fatalf("start barrier program: %v", err)
 	}
 
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "$J=G53G90X-10F600")
+		return hasMockLogEntry(events, "command", "$J=G53G90X-10F150")
 	})
 	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
-		return state.ActiveMove != nil
+		return state.ActiveMove != nil && state.ActiveMove.Progress < 0.5
 	})
+	// At less than 50% progress this four-second move has substantially more time
+	// remaining than the negative assertion window, so the window cannot straddle
+	// natural completion merely because the runner discovered motion late.
 	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G", "M5")
 
 	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
@@ -2148,7 +2153,7 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 		}
 		return -1
 	}
-	jog, system, following := index("$J=G53G90X-10F600"), index("$G"), index("M5")
+	jog, system, following := index("$J=G53G90X-10F150"), index("$G"), index("M5")
 	if jog < 0 || system <= jog || following <= system {
 		t.Fatalf("program command order invalid: jog=%d system=%d following=%d events=%+v", jog, system, following, events)
 	}
