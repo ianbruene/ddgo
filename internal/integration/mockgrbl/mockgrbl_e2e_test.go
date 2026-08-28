@@ -2111,6 +2111,64 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	}
 }
 
+func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "$J=G53 G90 X-10 F600\n$G\nM5\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("load barrier program: %v", err)
+	}
+	eventsAfter := mockEventCount(t, m)
+	responsesAfter := mockResponseCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start barrier program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$J=G53G90X-10F600")
+	})
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil
+	})
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G", "M5")
+
+	events := waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "M5")
+	})
+	index := func(command string) int {
+		for i, event := range events {
+			if event.Kind == "command" && event.Text == command {
+				return i
+			}
+		}
+		return -1
+	}
+	jog, system, following := index("$J=G53G90X-10F600"), index("$G"), index("M5")
+	if jog < 0 || system <= jog || following <= system {
+		t.Fatalf("program command order invalid: jog=%d system=%d following=%d events=%+v", jog, system, following, events)
+	}
+	statusBetween := false
+	for _, event := range events[system+1 : following] {
+		if event.Kind == "command" && event.Text == "?" {
+			statusBetween = true
+			break
+		}
+	}
+	if !statusBetween {
+		t.Fatalf("no fresh status poll between $G and M5; events=%+v", events)
+	}
+	responses := m.responses(t)[responsesAfter:]
+	if hasMockResponse(responses, "[MSG:Busy]") || hasMockResponse(responses, "error:9") {
+		t.Fatalf("barrier program triggered planner Busy response: %+v", responses)
+	}
+	requireProgramCompleted(t, controller, 3)
+}
+
 func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
 	m := startMockGRBLHoldingResponseFor(t, "$#")
 	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate

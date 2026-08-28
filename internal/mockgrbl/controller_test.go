@@ -714,7 +714,7 @@ func TestHomeResetsPositionAndReturnsIdle(t *testing.T) {
 	if out := joined(c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))); out != "ok\r\n" {
 		t.Fatalf("jog response = %q", out)
 	}
-	clk.Advance(time.Second)
+	clk.Advance(time.Hour)
 	if got := c.Snapshot().MachinePosition; got == DefaultMachineProfile().InitialPosition {
 		t.Fatalf("position did not change: %v", got)
 	}
@@ -726,6 +726,43 @@ func TestHomeResetsPositionAndReturnsIdle(t *testing.T) {
 	if !hasLog(c.Commands(), "command", "$H") || snap.State != StateIdle ||
 		snap.MachinePosition != DefaultMachineProfile().InitialPosition || snap.ActiveMove != nil || snap.QueuedCommandCount != 0 {
 		t.Fatalf("home snapshot = %+v; commands=%+v", snap, c.Commands())
+	}
+}
+
+func TestHomeRejectedWhilePlannerWorkExistsWithoutMutatingMotion(t *testing.T) {
+	c, clk := testCtl()
+	for _, command := range []string{
+		"$J=G53 G90 X-10 F60\n",
+		"$J=G53 G90 Y-10 F60\n",
+	} {
+		if out := joined(c.ProcessBytes([]byte(command))); out != "ok\r\n" {
+			t.Fatalf("jog response = %q", out)
+		}
+	}
+	before := c.Snapshot()
+	if before.ActiveMove == nil || before.QueuedCommandCount != 1 {
+		t.Fatalf("planner setup snapshot = %+v", before)
+	}
+
+	if out := joined(c.ProcessBytes([]byte("$H\n"))); !strings.Contains(out, "[MSG:Busy]\r\nerror:9") {
+		t.Fatalf("home during planner work = %q, want Busy error", out)
+	}
+	after := c.Snapshot()
+	if after.ActiveMove == nil || after.QueuedCommandCount != before.QueuedCommandCount ||
+		after.MachinePosition != before.MachinePosition {
+		t.Fatalf("rejected home mutated planner: before=%+v after=%+v", before, after)
+	}
+
+	clk.Advance(time.Hour)
+	if drained := c.Snapshot(); drained.ActiveMove != nil || drained.QueuedCommandCount != 0 {
+		t.Fatalf("planner did not drain: %+v", drained)
+	}
+	if out := joined(c.ProcessBytes([]byte("$H\n"))); out != "ok\r\n" {
+		t.Fatalf("home after planner drained = %q, want acceptance", out)
+	}
+	homed := c.Snapshot()
+	if homed.State != StateIdle || homed.MachinePosition != DefaultMachineProfile().InitialPosition {
+		t.Fatalf("home snapshot = %+v", homed)
 	}
 }
 
