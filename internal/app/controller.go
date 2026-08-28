@@ -931,6 +931,15 @@ func (r *commandRuntime) sendLineAndWaitOK(ctx context.Context, line string, sou
 
 func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line string) ([]string, error) {
 	c := r.controller
+	// Preserve the query admission contract before doing any potentially
+	// blocking system-command barrier work. In particular, a concurrent query
+	// must still fail immediately rather than waiting forever for machine status.
+	c.mu.Lock()
+	if r.session.queryRxCh != nil {
+		c.mu.Unlock()
+		return nil, ErrProgramQueryActive
+	}
+	c.mu.Unlock()
 	system := r.run != nil && isGRBLSystemCommand(line)
 	if system {
 		if err := r.waitForFreshIdle(ctx); err != nil {
@@ -941,6 +950,7 @@ func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line s
 		}
 	}
 	c.mu.Lock()
+	// Another caller may have won admission while this command was draining.
 	if r.session.queryRxCh != nil {
 		c.mu.Unlock()
 		return nil, ErrProgramQueryActive
@@ -987,6 +997,9 @@ func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line s
 			case responseFail:
 				return nil, fmt.Errorf("query command failed: %s", strings.TrimSpace(rx))
 			case responseIgnore:
+				if _, statusReport := grbl.ParseStatusReport(rx); statusReport {
+					continue
+				}
 				responses = append(responses, rx)
 			}
 		}
@@ -1307,7 +1320,9 @@ func (c *Controller) runTransportEventBridge() {
 				continue
 			}
 			suppressRXLog := false
+			statusReport := false
 			if report, ok := grbl.ParseStatusReport(ev.Text); ok {
+				statusReport = true
 				if c.pendingQuietStatusReports > 0 {
 					c.pendingQuietStatusReports--
 					suppressRXLog = true
@@ -1334,7 +1349,10 @@ func (c *Controller) runTransportEventBridge() {
 					c.state.HasFeedSpindle = true
 				}
 			}
-			overflowRun := c.deliverResponseLocked(ev.Generation, ev.Text)
+			var overflowRun *programRun
+			if !statusReport {
+				overflowRun = c.deliverResponseLocked(ev.Generation, ev.Text)
+			}
 			var snapshot versionedState
 			if !suppressRXLog {
 				snapshot = c.captureEventStateLocked()
