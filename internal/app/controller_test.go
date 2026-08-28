@@ -189,7 +189,7 @@ func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T)
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	path := writeProgramFile(t, "disconnect.gcode", "$G\n")
+	path := writeProgramFile(t, "disconnect.gcode", "M5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -249,15 +249,15 @@ func TestProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	path := writeProgramFile(t, "backlog.gcode", "$G\n")
+	path := writeProgramFile(t, "backlog.gcode", "M5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
-	if got := waitForTransportWrite(t, tr.writes); got != "$G" {
-		t.Fatalf("write = %q, want $G", got)
+	if got := waitForTransportWrite(t, tr.writes); got != "M5" {
+		t.Fatalf("write = %q, want M5", got)
 	}
 	for i := 0; i < 65; i++ {
 		tr.events <- transport.Event{Kind: transport.EventRX, Generation: 1, When: time.Now(), Text: "ok"}
@@ -283,7 +283,7 @@ func TestProgramQueryResponseBacklogOverflowFailsProgram(t *testing.T) {
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	path := writeProgramFile(t, "query-backlog.gcode", "$G\n")
+	path := writeProgramFile(t, "query-backlog.gcode", "M100\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}

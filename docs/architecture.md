@@ -37,7 +37,9 @@ Current program execution flow:
    - updates program progress.
 5. The controller marks the program completed after all lines finish, or failed when send, macro, rewrite, query, or controller response handling returns an error.
 
-Normal program sending only waits on terminal controller responses. Intermediate RX lines are ignored by ordinary program sends instead of being buffered as program output.
+For ordinary G-code, normal program sending only waits on terminal controller responses; `ok` acknowledges acceptance and does not prove execution has completed. Intermediate RX lines are ignored by ordinary program sends instead of being buffered as program output. A final ordinary line therefore retains the existing acknowledgement-based completion behavior.
+
+Program-owned commands whose final, trimmed outgoing text begins with `$` are execution barriers. Before transmitting one, the command runtime must observe a new status report (not a previously cached state) reporting `Idle`. After a successful terminal response it must observe another fresh `Idle` before progress or completion can advance. This applies equally to direct program lines and macro-generated queries such as `$#`; interactive/manual command runtimes are intentionally unchanged. Barrier waits retain program/session and connection-generation ownership and wake on stop, disconnect, cancellation, or alarm, while Hold remains a resumable state.
 
 ## Response collection
 

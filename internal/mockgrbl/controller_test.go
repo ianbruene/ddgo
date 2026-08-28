@@ -729,6 +729,24 @@ func TestHomeResetsPositionAndReturnsIdle(t *testing.T) {
 	}
 }
 
+func TestSystemCommandRejectedWhilePlannerMotionActive(t *testing.T) {
+	c, clk := testCtl()
+	if out := joined(c.ProcessBytes([]byte("$J=G53 G90 X-10 F60\n"))); out != "ok\r\n" {
+		t.Fatalf("jog response = %q", out)
+	}
+	if out := joined(c.ProcessBytes([]byte("$G\n"))); !strings.Contains(out, "error:9") {
+		t.Fatalf("system command during motion = %q, want Busy error", out)
+	}
+	clk.Advance(time.Hour)
+	// Snapshot reconciles the clock-driven planner state.
+	if snap := c.Snapshot(); snap.ActiveMove != nil || snap.QueuedCommandCount != 0 {
+		t.Fatalf("planner did not drain: %+v", snap)
+	}
+	if out := joined(c.ProcessBytes([]byte("$G\n"))); !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("system command after motion = %q, want acceptance", out)
+	}
+}
+
 func TestSoftResetEmitsResetAlarmStartupAndClearsMotion(t *testing.T) {
 	c, _ := testCtl()
 	for _, command := range []string{"$J=G53 G90 X-10 F60\n", "$J=G53 G90 Y-10 F60\n"} {

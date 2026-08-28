@@ -204,6 +204,12 @@ func (c *Controller) handleLine(raw string) []string {
 	if strings.HasPrefix(norm, "$J=") {
 		return c.handleJog(norm)
 	}
+	// GRBL rejects ordinary system commands while planner work is active. Jog
+	// commands retain their dedicated semantics above; recovery commands below
+	// are only restricted when there is real active/queued work.
+	if strings.HasPrefix(norm, "$") && norm != "$X" && norm != "$H" && (c.active != nil || len(c.queue) > 0) {
+		return c.errorLine(norm, "Busy", 9)
+	}
 	if strings.HasPrefix(norm, "G10L2") {
 		return c.handleWCSWrite(norm)
 	}

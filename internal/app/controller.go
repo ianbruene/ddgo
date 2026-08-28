@@ -111,19 +111,21 @@ type Controller struct {
 	lastProbe                               macro.Point
 	hasLastProbe                            bool
 	pendingQuietStatusReports               int
+	statusReportChanged                     chan struct{}
 	suppressTransportDisconnectedGeneration transport.ConnectionGeneration
 }
 
 func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller {
 	c := &Controller{
-		transport:          t,
-		listPorts:          listPorts,
-		events:             make(chan Event, 1024),
-		state:              State{ProgramStatus: ProgramNotLoaded},
-		statusPollInterval: defaultStatusPollInterval,
-		macroEngine:        macro.NewDefaultEngine(),
-		variables:          macro.NewVariableStore(),
-		contour:            macro.NewContourState(),
+		transport:           t,
+		listPorts:           listPorts,
+		events:              make(chan Event, 1024),
+		state:               State{ProgramStatus: ProgramNotLoaded},
+		statusPollInterval:  defaultStatusPollInterval,
+		macroEngine:         macro.NewDefaultEngine(),
+		variables:           macro.NewVariableStore(),
+		contour:             macro.NewContourState(),
+		statusReportChanged: make(chan struct{}),
 	}
 	go c.runTransportEventBridge()
 	return c
@@ -884,6 +886,15 @@ func (c *Controller) SendLineCollectingResponses(ctx context.Context, line strin
 }
 
 func (r *commandRuntime) sendLineAndWaitOK(ctx context.Context, line string, sourceLine int) error {
+	system := r.run != nil && isGRBLSystemCommand(line)
+	if system {
+		if err := r.waitForFreshIdle(ctx); err != nil {
+			return err
+		}
+		if err := r.controller.waitUntilRunnable(ctx, r.run); err != nil {
+			return err
+		}
+	}
 	c := r.controller
 	msg := transport.NewLineMessage(line)
 	if err := c.transport.Write(ctx, msg); err != nil {
@@ -904,6 +915,9 @@ func (r *commandRuntime) sendLineAndWaitOK(ctx context.Context, line string, sou
 			case responseIgnore:
 				continue
 			case responseOK:
+				if system {
+					return r.waitForFreshIdle(ctx)
+				}
 				return nil
 			case responseFail:
 				if sourceLine > 0 {
@@ -917,6 +931,15 @@ func (r *commandRuntime) sendLineAndWaitOK(ctx context.Context, line string, sou
 
 func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line string) ([]string, error) {
 	c := r.controller
+	system := r.run != nil && isGRBLSystemCommand(line)
+	if system {
+		if err := r.waitForFreshIdle(ctx); err != nil {
+			return nil, err
+		}
+		if err := c.waitUntilRunnable(ctx, r.run); err != nil {
+			return nil, err
+		}
+	}
 	c.mu.Lock()
 	if r.session.queryRxCh != nil {
 		c.mu.Unlock()
@@ -948,11 +971,64 @@ func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line s
 		case rx := <-queryCh:
 			switch classifyProgramResponse(rx) {
 			case responseOK:
+				if system {
+					// Stop routing query payloads before the barrier, so unsolicited
+					// failures remain visible on the session's terminal channel.
+					c.mu.Lock()
+					if r.session.queryRxCh == queryCh {
+						r.session.queryRxCh = nil
+					}
+					c.mu.Unlock()
+					if err := r.waitForFreshIdle(ctx); err != nil {
+						return nil, err
+					}
+				}
 				return responses, nil
 			case responseFail:
 				return nil, fmt.Errorf("query command failed: %s", strings.TrimSpace(rx))
 			case responseIgnore:
 				responses = append(responses, rx)
+			}
+		}
+	}
+}
+
+func isGRBLSystemCommand(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "$") }
+
+// waitForFreshIdle deliberately snapshots the next-report notification before
+// inspecting any state. Thus an Idle cached before this barrier can never pass it.
+func (r *commandRuntime) waitForFreshIdle(ctx context.Context) error {
+	c := r.controller
+	for {
+		c.mu.RLock()
+		if r.run == nil || c.run != r.run || c.connectionGeneration != r.run.generation {
+			c.mu.RUnlock()
+			return context.Canceled
+		}
+		changed := c.statusReportChanged
+		c.mu.RUnlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.session.Done():
+			return r.session.Err()
+		case rx := <-r.session.rxCh:
+			if classifyProgramResponse(rx) == responseFail {
+				return fmt.Errorf("program failed while waiting for Idle: %s", strings.TrimSpace(rx))
+			}
+		case <-changed:
+			c.mu.RLock()
+			current := c.run == r.run && c.connectionGeneration == r.run.generation
+			state := c.state.MachineState
+			c.mu.RUnlock()
+			if !current {
+				return context.Canceled
+			}
+			if strings.EqualFold(state, "Alarm") {
+				return errors.New("machine entered Alarm while waiting for Idle")
+			}
+			if strings.EqualFold(state, "Idle") {
+				return nil
 			}
 		}
 	}
@@ -1237,6 +1313,8 @@ func (c *Controller) runTransportEventBridge() {
 					suppressRXLog = true
 				}
 				c.state.MachineState = report.State
+				close(c.statusReportChanged)
+				c.statusReportChanged = make(chan struct{})
 				c.state.LastStatusRaw = report.Raw
 				if report.HasMPos {
 					c.state.MachinePosition = report.MPos
