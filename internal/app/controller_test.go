@@ -812,6 +812,140 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 	}
 }
 
+func startBarrierTestProgram(t *testing.T, program string, staleIdle bool) (*Controller, *transport.FakeTransport) {
+	t.Helper()
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = time.Hour
+	if err := controller.LoadProgramFile(writeProgramFile(t, "barrier.gcode", program)); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if staleIdle {
+		fake.InjectRX("<Idle|MPos:0,0,0>")
+		waitForState(t, controller, func(s State) bool { return s.MachineState == "Idle" })
+	}
+	drainEvents(controller.Events())
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	return controller, fake
+}
+
+func TestControllerProgramSystemCommandRequiresFreshIdleOnBothSides(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "G1 X1\n$G\nM5\n", true)
+	waitForLineWrites(t, fake, "G1 X1")
+	fake.InjectRX("ok")
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1"})
+
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1"})
+	releaseFreshIdleBarrier(t, controller, fake, "G1 X1", "$G")
+
+	fake.InjectRX("ok")
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1", "$G"})
+	if state := controller.Snapshot(); state.ProgramComplete != 1 || state.ProgramStatus != ProgramRunning {
+		t.Fatalf("state after system-command ok = %+v, want one completed line and running", state)
+	}
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1", "$G"})
+	releaseFreshIdleBarrier(t, controller, fake, "G1 X1", "$G", "M5")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramComplete == 3 && s.ProgramStatus == ProgramCompleted
+	})
+}
+
+func TestControllerFinalSystemCommandCompletesOnlyAfterPostIdle(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "M5\n$G\n", false)
+	waitForLineWrites(t, fake, "M5")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramComplete == 1 && s.ProgramStatus == ProgramRunning
+	})
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	releaseFreshIdleBarrier(t, controller, fake, "M5", "$G")
+	drainEvents(controller.Events())
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramComplete == 1 && s.ProgramStatus == ProgramRunning
+	})
+	events := collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)
+	assertEventTextCount(t, events, "program barrier.gcode completed", 0)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	releaseFreshIdleUntil(t, controller, fake, func() bool {
+		return controller.Snapshot().ProgramStatus == ProgramCompleted
+	})
+}
+
+func TestControllerStopProgramCancelsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, nil)
+	if err := controller.StopProgram(context.Background()); err != nil {
+		t.Fatalf("StopProgram() error = %v", err)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramStopped })
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+	writes := fake.Written()
+	if len(writes) < 2 || writes[len(writes)-2].Display != "!" || writes[len(writes)-1].Display != "Ctrl-X" {
+		t.Fatalf("stop writes = %#v, want hold then Ctrl-X", writes)
+	}
+}
+
+func TestControllerDisconnectCancelsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectDisconnected()
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if state.LastError != ErrTransportDisconnected.Error() {
+		t.Fatalf("LastError = %q, want %q", state.LastError, ErrTransportDisconnected)
+	}
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+}
+
+func TestControllerAlarmStatusFailsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, nil)
+	state := injectAlarmUntilProgramFails(t, controller, fake)
+	if !strings.Contains(state.LastError, "Alarm while waiting for Idle") {
+		t.Fatalf("LastError = %q, want Alarm while waiting for Idle", state.LastError)
+	}
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+}
+
+func TestControllerTerminalFailureEndsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectRX("error:9")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "while waiting for Idle: error:9") {
+		t.Fatalf("LastError = %q, want terminal failure during Idle wait", state.LastError)
+	}
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+}
+
 func TestControllerStartProgramDisablesContourPreservesPoints(t *testing.T) {
 	t.Parallel()
 
@@ -1152,6 +1286,89 @@ func waitForWrites(t *testing.T, fake *transport.FakeTransport, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d writes; got %d", want, len(fake.Written()))
+}
+
+// lineWrites excludes realtime traffic so barrier tests remain focused on the
+// ordering of program-owned line commands even if polling changes later.
+func lineWrites(fake *transport.FakeTransport) []string {
+	var lines []string
+	for _, write := range fake.Written() {
+		if strings.HasSuffix(string(write.Payload), "\n") {
+			lines = append(lines, write.Display)
+		}
+	}
+	return lines
+}
+
+func waitForLineWrites(t *testing.T, fake *transport.FakeTransport, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := lineWrites(fake); reflect.DeepEqual(got, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("line writes = %#v, want %#v", lineWrites(fake), want)
+}
+
+func ensureLineWritesStayAt(t *testing.T, fake *transport.FakeTransport, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(noExtraLifecycleEventWindow)
+	for time.Now().Before(deadline) {
+		if got := lineWrites(fake); !reflect.DeepEqual(got, want) {
+			t.Fatalf("line writes changed to %#v, want %#v", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// releaseFreshIdleBarrier drives reports one at a time until an Idle observed
+// after the waiter subscribed releases the barrier. A goroutine can be
+// descheduled between processing a report and subscribing for the next one, so
+// observing controller state alone is not a waiter-ready handshake. Retrying a
+// bounded Run/Idle pair keeps the test on public behavior and prevents a report
+// delivered during that scheduling gap from becoming the last report supplied.
+func releaseFreshIdleBarrier(t *testing.T, controller *Controller, fake *transport.FakeTransport, want ...string) {
+	t.Helper()
+	releaseFreshIdleUntil(t, controller, fake, func() bool { return reflect.DeepEqual(lineWrites(fake), want) })
+}
+
+func releaseFreshIdleUntil(t *testing.T, controller *Controller, fake *transport.FakeTransport, released func() bool) {
+	t.Helper()
+	for attempt := 0; attempt < 20; attempt++ {
+		run := fmt.Sprintf("<Run|MPos:%d,0,0>", attempt)
+		fake.InjectRX(run)
+		waitForState(t, controller, func(s State) bool { return s.LastStatusRaw == run })
+		idle := fmt.Sprintf("<Idle|MPos:%d,0,0>", attempt)
+		fake.InjectRX(idle)
+		deadline := time.Now().Add(25 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if released() {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatalf("fresh Idle did not release barrier; line writes = %#v, state = %+v", lineWrites(fake), controller.Snapshot())
+}
+
+func injectAlarmUntilProgramFails(t *testing.T, controller *Controller, fake *transport.FakeTransport) State {
+	t.Helper()
+	for attempt := 0; attempt < 20; attempt++ {
+		alarm := fmt.Sprintf("<Alarm|MPos:%d,0,0>", attempt)
+		fake.InjectRX(alarm)
+		deadline := time.Now().Add(25 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			state := controller.Snapshot()
+			if state.ProgramStatus == ProgramFailed {
+				return state
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatalf("Alarm reports did not fail program; state = %+v", controller.Snapshot())
+	return State{}
 }
 
 // keepReportingIdle supplies the fresh status reports required by tests whose
@@ -1686,9 +1903,7 @@ func TestControllerMacroHandlerCanSendControllerLines(t *testing.T) {
 }
 
 func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
-	t.Parallel()
-
-	path := writeProgramFile(t, "macro-query.gcode", "M90\n")
+	path := writeProgramFile(t, "macro-query.gcode", "M90\nM5\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
 	controller.statusPollInterval = 10 * time.Second
@@ -1711,19 +1926,32 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
-	keepReportingIdle(t, fake)
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Idle" })
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-query.gcode")
-	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
-		t.Fatalf("query write = %q, want %q", got, want)
-	}
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, nil)
+	releaseFreshIdleBarrier(t, controller, fake, "$#")
 
 	fake.InjectRX("[G54:1.000,2.000,3.000]")
+	fake.InjectRX("<Hold|MPos:0,0,0>")
 	fake.InjectRX("[G55:4.000,5.000,6.000]")
 	fake.InjectRX("ok")
+	ensureLineWritesStayAt(t, fake, []string{"$#"})
+	select {
+	case lines := <-received:
+		t.Fatalf("query returned before post-command Idle with lines %#v", lines)
+	default:
+	}
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, []string{"$#"})
+	releaseFreshIdleBarrier(t, controller, fake, "$#", "M5")
 
 	var lines []string
 	select {
@@ -1735,7 +1963,8 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 	if !reflect.DeepEqual(lines, want) {
 		t.Fatalf("collected lines = %#v, want %#v", lines, want)
 	}
-	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
 }
 
 func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {

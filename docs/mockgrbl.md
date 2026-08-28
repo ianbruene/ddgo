@@ -72,7 +72,7 @@ curl -X POST 'http://127.0.0.1:8088/hard-limit?axis=X'
 
 Normal firmware responses are written to the PTY as commands are processed. Debug-triggered output from `/hard-limit` is instead queued for serial delivery and drains on the next inbound PTY byte, commonly a status poll (`?`). A soft reset, whether triggered through `/reset` or by a serial reset byte, clears pending serial output; the HTTP reset response itself is returned to the HTTP caller rather than queued. An `ok` response means that a command was accepted, not that its motion has completed.
 
-Like firmware, the mock rejects normal `$` system commands with a Busy error while an active move or queued planner work exists. `$J=` keeps its separate jog path, and unlock remains available when there is no actual planner work. This makes unsafe application streaming fail independently of DDGo's program barrier workaround.
+Like firmware, the mock rejects ordinary `$` system commands with a Busy error while an active move or queued planner work exists. `$J=` keeps its separate jog semantics, while `$X` remains available as a recovery/unlock command. `$H` is an ordinary system command for planner-busy admission: it is accepted only after active and queued work has drained. This makes unsafe application streaming fail independently of DDGo's program barrier workaround.
 
 ## Motion model
 

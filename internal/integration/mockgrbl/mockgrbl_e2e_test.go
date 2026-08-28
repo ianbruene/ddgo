@@ -38,13 +38,15 @@ type mockProcess struct {
 }
 
 type mockState struct {
-	State              string      `json:"state"`
-	MachinePosition    [3]float64  `json:"machine_position"`
-	ActiveMove         interface{} `json:"active_move"`
-	QueuedCommandCount int         `json:"queued_command_count"`
-	FreePlannerBlocks  int         `json:"free_planner_blocks"`
-	QueueCapacity      int         `json:"queue_capacity"`
-	LastErrorAlarm     string      `json:"last_error_alarm"`
+	State           string     `json:"state"`
+	MachinePosition [3]float64 `json:"machine_position"`
+	ActiveMove      *struct {
+		Progress float64 `json:"progress"`
+	} `json:"active_move"`
+	QueuedCommandCount int    `json:"queued_command_count"`
+	FreePlannerBlocks  int    `json:"free_planner_blocks"`
+	QueueCapacity      int    `json:"queue_capacity"`
+	LastErrorAlarm     string `json:"last_error_alarm"`
 }
 
 type mockLogEntry struct {
@@ -2109,6 +2111,65 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	if !idle.Connected || idle.MachineState != "Idle" || idle.LastError != "" {
 		t.Fatalf("final recovery status = %+v, want connected idle with no error", idle)
 	}
+}
+
+func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "$J=G53 G90 X-10 F150\n$G\nM5\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("load barrier program: %v", err)
+	}
+	eventsAfter := mockEventCount(t, m)
+	responsesAfter := mockResponseCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start barrier program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$J=G53G90X-10F150")
+	})
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil && state.ActiveMove.Progress < 0.5
+	})
+	// At less than 50% progress this four-second move has substantially more time
+	// remaining than the negative assertion window, so the window cannot straddle
+	// natural completion merely because the runner discovered motion late.
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G", "M5")
+
+	// The four-second move plus the independent post-jog, pre-$G, and post-$G
+	// fresh-status barriers can legitimately exceed five seconds at the normal
+	// poll cadence. Keep this below the run context while allowing the complete
+	// synchronization sequence to finish on a loaded runner.
+	events := waitForNewMockEvents(t, m, eventsAfter, 10*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "M5")
+	})
+	index := func(command string) int {
+		for i, event := range events {
+			if event.Kind == "command" && event.Text == command {
+				return i
+			}
+		}
+		return -1
+	}
+	jog, system, following := index("$J=G53G90X-10F150"), index("$G"), index("M5")
+	if jog < 0 || system <= jog || following <= system {
+		t.Fatalf("program command order invalid: jog=%d system=%d following=%d events=%+v", jog, system, following, events)
+	}
+	// Mock history records when the PTY generates a status response, not when the
+	// serial transport delivers it to DDGo. Do not infer barrier receive ordering
+	// from the relative log positions of '?' or '<Idle|...>'; the focused fake-
+	// transport tests control and assert that post-command invariant directly.
+	responses := m.responses(t)[responsesAfter:]
+	if hasMockResponse(responses, "[MSG:Busy]") || hasMockResponse(responses, "error:9") {
+		t.Fatalf("barrier program triggered planner Busy response: %+v", responses)
+	}
+	requireProgramCompleted(t, controller, 3)
 }
 
 func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
