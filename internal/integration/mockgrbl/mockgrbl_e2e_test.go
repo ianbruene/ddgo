@@ -2152,21 +2152,10 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 	if jog < 0 || system <= jog || following <= system {
 		t.Fatalf("program command order invalid: jog=%d system=%d following=%d events=%+v", jog, system, following, events)
 	}
-	// Assert on the status response rather than the poll command. The PTY may
-	// process/log a poll just before $G while its response reaches DDGo after the
-	// command acknowledgement. In that valid ordering, the fresh Idle report
-	// still releases the post-command barrier even though the corresponding "?"
-	// command is not between $G and M5 in mock history.
-	idleReportBetween := false
-	for _, event := range events[system+1 : following] {
-		if event.Kind == "response" && strings.HasPrefix(event.Text, "<Idle|") {
-			idleReportBetween = true
-			break
-		}
-	}
-	if !idleReportBetween {
-		t.Fatalf("no fresh Idle report between $G and M5; events=%+v", events)
-	}
+	// Mock history records when the PTY generates a status response, not when the
+	// serial transport delivers it to DDGo. Do not infer barrier receive ordering
+	// from the relative log positions of '?' or '<Idle|...>'; the focused fake-
+	// transport tests control and assert that post-command invariant directly.
 	responses := m.responses(t)[responsesAfter:]
 	if hasMockResponse(responses, "[MSG:Busy]") || hasMockResponse(responses, "error:9") {
 		t.Fatalf("barrier program triggered planner Busy response: %+v", responses)
