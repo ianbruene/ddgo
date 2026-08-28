@@ -189,7 +189,7 @@ func TestControllerHandlesTransportDisconnectedWhileProgramRunning(t *testing.T)
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	path := writeProgramFile(t, "disconnect.gcode", "$G\n")
+	path := writeProgramFile(t, "disconnect.gcode", "M5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
@@ -249,15 +249,15 @@ func TestProgramResponseBacklogOverflowFailsProgram(t *testing.T) {
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	path := writeProgramFile(t, "backlog.gcode", "$G\n")
+	path := writeProgramFile(t, "backlog.gcode", "M5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
-	if got := waitForTransportWrite(t, tr.writes); got != "$G" {
-		t.Fatalf("write = %q, want $G", got)
+	if got := waitForTransportWrite(t, tr.writes); got != "M5" {
+		t.Fatalf("write = %q, want M5", got)
 	}
 	for i := 0; i < 65; i++ {
 		tr.events <- transport.Event{Kind: transport.EventRX, Generation: 1, When: time.Now(), Text: "ok"}
@@ -283,10 +283,16 @@ func TestProgramQueryResponseBacklogOverflowFailsProgram(t *testing.T) {
 	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	path := writeProgramFile(t, "query-backlog.gcode", "$G\n")
+	path := writeProgramFile(t, "query-backlog.gcode", "M5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("LoadProgramFile() error = %v", err)
 	}
+	go func() {
+		for i := 0; i < 100; i++ {
+			tr.events <- transport.Event{Kind: transport.EventRX, Generation: 1, When: time.Now(), Text: "<Idle|MPos:0,0,0>"}
+			time.Sleep(time.Millisecond)
+		}
+	}()
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1148,6 +1154,27 @@ func waitForWrites(t *testing.T, fake *transport.FakeTransport, want int) {
 	t.Fatalf("timed out waiting for %d writes; got %d", want, len(fake.Written()))
 }
 
+// keepReportingIdle supplies the fresh status reports required by tests whose
+// subject is macro behavior rather than system-command barriers. Barrier tests
+// inject individual reports explicitly and do not use this helper.
+func keepReportingIdle(t *testing.T, fake *transport.FakeTransport) {
+	t.Helper()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fake.InjectRX("<Idle|MPos:0,0,0>")
+			}
+		}
+	}()
+}
+
 func ensureWritesStayAt(t *testing.T, fake *transport.FakeTransport, want int, dur time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(dur)
@@ -1328,6 +1355,7 @@ func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1362,6 +1390,7 @@ func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1408,6 +1437,7 @@ func TestControllerDefaultM100VerificationFailureFailsProgram(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1456,6 +1486,7 @@ func TestControllerDefaultM101PassAllowsNextLine(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1495,6 +1526,7 @@ func TestControllerDefaultM101FailurePreventsNextLine(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1679,6 +1711,7 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1726,6 +1759,7 @@ func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -1933,6 +1967,7 @@ func TestControllerReadWCSOffsetsUsesQueryHelper(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -2073,6 +2108,7 @@ func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *tes
 	controller.state.ProgramStatus = ProgramRunning
 	controller.mu.Unlock()
 
+	keepReportingIdle(t, fake)
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := controller.sendLineCollectingResponses(context.Background(), run, "$#")
@@ -2374,6 +2410,7 @@ func TestControllerDefaultM102WCSExpressionReadsOnceAndWrites(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -2445,6 +2482,7 @@ func TestControllerDefaultM106PassAllowsNextLine(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
@@ -2482,6 +2520,7 @@ func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
+	keepReportingIdle(t, fake)
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}

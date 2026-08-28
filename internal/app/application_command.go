@@ -213,6 +213,7 @@ func (c *Controller) runtimeForSession(session *responseSession) *commandRuntime
 type commandRuntime struct {
 	controller *Controller
 	session    *responseSession
+	run        *programRun
 }
 
 func (r *commandRuntime) SendLineAndWaitOK(ctx context.Context, line string) error {
@@ -274,7 +275,7 @@ func (run *programRun) responseSession() *responseSession {
 }
 
 func (c *Controller) runtimeForProgramRun(run *programRun) *commandRuntime {
-	return c.runtimeForSession(run.responseSession())
+	return &commandRuntime{controller: c, session: run.responseSession(), run: run}
 }
 
 func (c *Controller) sendLineCollectingResponses(ctx context.Context, run *programRun, line string) ([]string, error) {

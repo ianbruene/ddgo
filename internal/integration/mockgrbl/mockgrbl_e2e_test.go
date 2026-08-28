@@ -1695,11 +1695,11 @@ func TestDDGoProgramControlsRejectAfterStopAgainstMock(t *testing.T) {
 }
 
 func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
-	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "$G"})
+	m := startMockGRBLWithOptions(t, mockGRBLOptions{SuppressResponseFor: "M5"})
 	h := connectControllerToMockWithEvents(t, m)
 	controller := h.Controller
 
-	programPath := writeIntegrationProgramFile(t, "program-missing-ack.gcode", "$G\n")
+	programPath := writeIntegrationProgramFile(t, "program-missing-ack.gcode", "M5\n")
 	if err := controller.LoadProgramFile(programPath); err != nil {
 		t.Fatalf("load missing ack program: %v", err)
 	}
@@ -1717,7 +1717,7 @@ func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
 	}
 
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "$G")
+		return hasMockLogEntry(events, "command", "M5")
 	})
 	assertNoNewMockResponseContainingFor(t, m, responsesAfter, 500*time.Millisecond, "[GC:", "ok")
 	failed := requireProgramFailedWithError(t, controller, "context deadline exceeded")
@@ -2071,7 +2071,9 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 
-	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Allow the program-owned $G to cross its pre-send fresh-status barrier before
+	// the deliberately suppressed command response times out the run.
+	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer runCancel()
 	if err := controller.StartProgram(runCtx); err != nil {
 		t.Fatalf("start timeout failure program: %v", err)
@@ -2166,7 +2168,7 @@ func TestDDGoProgramQueryFailsWhenResponseIsMissingAgainstMock(t *testing.T) {
 		return line.Text, false, err
 	}})
 
-	programPath := writeIntegrationProgramFile(t, "program-query-missing-response.gcode", "$G\n")
+	programPath := writeIntegrationProgramFile(t, "program-query-missing-response.gcode", "M5\n")
 	if err := controller.LoadProgramFile(programPath); err != nil {
 		t.Fatalf("load query missing response program: %v", err)
 	}
@@ -2177,7 +2179,9 @@ func TestDDGoProgramQueryFailsWhenResponseIsMissingAgainstMock(t *testing.T) {
 	eventsAfter := mockEventCount(t, m)
 	controllerEventsAfter := h.eventCount()
 
-	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Allow the generated $# to cross its pre-send fresh-status barrier before
+	// the deliberately suppressed command response times out the run.
+	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer runCancel()
 	if err := controller.StartProgram(runCtx); err != nil {
 		t.Fatalf("start query missing response program: %v", err)
@@ -2193,7 +2197,7 @@ func TestDDGoProgramQueryFailsWhenResponseIsMissingAgainstMock(t *testing.T) {
 			strings.Contains(snapshot.LastError, "context deadline exceeded")
 	})
 	requireProgramErrorEvent(t, h, controllerEventsAfter, "context deadline exceeded")
-	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "$G")
+	assertNoNewMockCommandContainingFor(t, m, eventsAfter, 300*time.Millisecond, "M5")
 
 	requestStatus(t, controller)
 	idle := requireControllerIdle(t, controller)
@@ -2660,7 +2664,7 @@ func TestDDGoDefaultM107M108CopyWCSAgainstMock(t *testing.T) {
 func TestDDGoDefaultM100WritesMidpointAgainstMock(t *testing.T) {
 	m := startMockGRBL(t)
 	controller := connectControllerToMockWithEvents(t, m).Controller
-	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m100-midpoint.gcode", "G10 L2 P1 X1.000000\nG10 L2 P2 X3.000000\nM100 G54X G55X G56X\n$#\n")); err != nil {
+	if err := controller.LoadProgramFile(writeIntegrationProgramFile(t, "default-m100-midpoint.gcode", "G10 L2 P1 X1.000000\nG10 L2 P2 X3.000000\nM100 G54X G55X G56X\nM5\n")); err != nil {
 		t.Fatalf("load midpoint macro program: %v", err)
 	}
 	requestStatus(t, controller)
@@ -2991,7 +2995,7 @@ func TestDDGoProgramAcksAreNotConfusedByStatusPollingAgainstMock(t *testing.T) {
 	programPath := writeIntegrationProgramFile(
 		t,
 		"polling-ack-mock-program.gcode",
-		repeatedProgramLine("$G", pollingAckProgramLines),
+		repeatedProgramLine("M5", pollingAckProgramLines),
 	)
 	if err := controller.LoadProgramFile(programPath); err != nil {
 		t.Fatalf("load polling ack program: %v", err)
@@ -3014,11 +3018,10 @@ func TestDDGoProgramAcksAreNotConfusedByStatusPollingAgainstMock(t *testing.T) {
 	}
 
 	waitForNewMockResponses(t, m, responsesAfter, 10*time.Second, func(responses []mockLogEntry) bool {
-		return countMockResponses(responses, "[GC:") >= pollingAckProgramLines &&
-			countMockResponses(responses, "ok") >= pollingAckProgramLines
+		return countMockResponses(responses, "ok") >= pollingAckProgramLines
 	})
 	waitForNewMockEvents(t, m, eventsAfter, 10*time.Second, func(events []mockLogEntry) bool {
-		return countMockEvents(events, "command", "$G") >= pollingAckProgramLines &&
+		return countMockEvents(events, "command", "M5") >= pollingAckProgramLines &&
 			hasMockLogEntry(events, "command", "?")
 	})
 	h.waitForEventsAfter(t, controllerEventsAfter, 10*time.Second, func(events []app.Event) bool {
@@ -3707,7 +3710,10 @@ func TestDDGoJogLimitRejectionAgainstMock(t *testing.T) {
 
 func writeRepeatedGStateProgram(t *testing.T, name string, count int) string {
 	t.Helper()
-	return writeIntegrationProgramFile(t, name, repeatedProgramLine("$G", count))
+	// These lifecycle tests only need acknowledged program lines. Using $G here
+	// would turn every line into an execution barrier and make their intended
+	// long-running timing depend on status-poll cadence.
+	return writeIntegrationProgramFile(t, name, repeatedProgramLine("M5", count))
 }
 
 func writeIntegrationProgramFile(t *testing.T, name string, contents string) string {
