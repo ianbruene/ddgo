@@ -1710,8 +1710,7 @@ func TestDDGoProgramFailsWhenAckIsMissingAgainstMock(t *testing.T) {
 	responsesAfter := mockResponseCount(t, m)
 	controllerEventsAfter := h.eventCount()
 
-	// The generated $# first waits for a fresh status report before it is sent.
-	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer runCancel()
 	if err := controller.StartProgram(runCtx); err != nil {
 		t.Fatalf("start missing ack program: %v", err)
@@ -2072,7 +2071,7 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 
-	// Allow the generated $# to cross its pre-send fresh-status barrier before
+	// Allow the program-owned $G to cross its pre-send fresh-status barrier before
 	// the deliberately suppressed command response times out the run.
 	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer runCancel()
@@ -2180,7 +2179,9 @@ func TestDDGoProgramQueryFailsWhenResponseIsMissingAgainstMock(t *testing.T) {
 	eventsAfter := mockEventCount(t, m)
 	controllerEventsAfter := h.eventCount()
 
-	runCtx, runCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Allow the generated $# to cross its pre-send fresh-status barrier before
+	// the deliberately suppressed command response times out the run.
+	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer runCancel()
 	if err := controller.StartProgram(runCtx); err != nil {
 		t.Fatalf("start query missing response program: %v", err)
