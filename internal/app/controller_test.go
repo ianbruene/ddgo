@@ -843,8 +843,7 @@ func TestControllerProgramSystemCommandRequiresFreshIdleOnBothSides(t *testing.T
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
 	ensureLineWritesStayAt(t, fake, []string{"G1 X1"})
-	fake.InjectRX("<Idle|MPos:0,0,0>")
-	waitForLineWrites(t, fake, "G1 X1", "$G")
+	releaseFreshIdleBarrier(t, controller, fake, "G1 X1", "$G")
 
 	fake.InjectRX("ok")
 	ensureLineWritesStayAt(t, fake, []string{"G1 X1", "$G"})
@@ -854,8 +853,7 @@ func TestControllerProgramSystemCommandRequiresFreshIdleOnBothSides(t *testing.T
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
 	ensureLineWritesStayAt(t, fake, []string{"G1 X1", "$G"})
-	fake.InjectRX("<Idle|MPos:0,0,0>")
-	waitForLineWrites(t, fake, "G1 X1", "$G", "M5")
+	releaseFreshIdleBarrier(t, controller, fake, "G1 X1", "$G", "M5")
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool {
 		return s.ProgramComplete == 3 && s.ProgramStatus == ProgramCompleted
@@ -871,8 +869,7 @@ func TestControllerFinalSystemCommandCompletesOnlyAfterPostIdle(t *testing.T) {
 	})
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
-	fake.InjectRX("<Idle|MPos:0,0,0>")
-	waitForLineWrites(t, fake, "M5", "$G")
+	releaseFreshIdleBarrier(t, controller, fake, "M5", "$G")
 	drainEvents(controller.Events())
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool {
@@ -882,8 +879,9 @@ func TestControllerFinalSystemCommandCompletesOnlyAfterPostIdle(t *testing.T) {
 	assertEventTextCount(t, events, "program barrier.gcode completed", 0)
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
-	fake.InjectRX("<Idle|MPos:0,0,0>")
-	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+	releaseFreshIdleUntil(t, controller, fake, func() bool {
+		return controller.Snapshot().ProgramStatus == ProgramCompleted
+	})
 }
 
 func TestControllerStopProgramCancelsSystemCommandPreBarrier(t *testing.T) {
@@ -924,8 +922,7 @@ func TestControllerAlarmStatusFailsSystemCommandPreBarrier(t *testing.T) {
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
 	ensureLineWritesStayAt(t, fake, nil)
-	fake.InjectRX("<Alarm|MPos:0,0,0>")
-	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	state := injectAlarmUntilProgramFails(t, controller, fake)
 	if !strings.Contains(state.LastError, "Alarm while waiting for Idle") {
 		t.Fatalf("LastError = %q, want Alarm while waiting for Idle", state.LastError)
 	}
@@ -1324,6 +1321,54 @@ func ensureLineWritesStayAt(t *testing.T, fake *transport.FakeTransport, want []
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// releaseFreshIdleBarrier drives reports one at a time until an Idle observed
+// after the waiter subscribed releases the barrier. A goroutine can be
+// descheduled between processing a report and subscribing for the next one, so
+// observing controller state alone is not a waiter-ready handshake. Retrying a
+// bounded Run/Idle pair keeps the test on public behavior and prevents a report
+// delivered during that scheduling gap from becoming the last report supplied.
+func releaseFreshIdleBarrier(t *testing.T, controller *Controller, fake *transport.FakeTransport, want ...string) {
+	t.Helper()
+	releaseFreshIdleUntil(t, controller, fake, func() bool { return reflect.DeepEqual(lineWrites(fake), want) })
+}
+
+func releaseFreshIdleUntil(t *testing.T, controller *Controller, fake *transport.FakeTransport, released func() bool) {
+	t.Helper()
+	for attempt := 0; attempt < 20; attempt++ {
+		run := fmt.Sprintf("<Run|MPos:%d,0,0>", attempt)
+		fake.InjectRX(run)
+		waitForState(t, controller, func(s State) bool { return s.LastStatusRaw == run })
+		idle := fmt.Sprintf("<Idle|MPos:%d,0,0>", attempt)
+		fake.InjectRX(idle)
+		deadline := time.Now().Add(25 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if released() {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatalf("fresh Idle did not release barrier; line writes = %#v, state = %+v", lineWrites(fake), controller.Snapshot())
+}
+
+func injectAlarmUntilProgramFails(t *testing.T, controller *Controller, fake *transport.FakeTransport) State {
+	t.Helper()
+	for attempt := 0; attempt < 20; attempt++ {
+		alarm := fmt.Sprintf("<Alarm|MPos:%d,0,0>", attempt)
+		fake.InjectRX(alarm)
+		deadline := time.Now().Add(25 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			state := controller.Snapshot()
+			if state.ProgramStatus == ProgramFailed {
+				return state
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatalf("Alarm reports did not fail program; state = %+v", controller.Snapshot())
+	return State{}
 }
 
 // keepReportingIdle supplies the fresh status reports required by tests whose
@@ -1891,8 +1936,7 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
 	ensureLineWritesStayAt(t, fake, nil)
-	fake.InjectRX("<Idle|MPos:0,0,0>")
-	waitForLineWrites(t, fake, "$#")
+	releaseFreshIdleBarrier(t, controller, fake, "$#")
 
 	fake.InjectRX("[G54:1.000,2.000,3.000]")
 	fake.InjectRX("<Hold|MPos:0,0,0>")
@@ -1907,7 +1951,7 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 	fake.InjectRX("<Run|MPos:0,0,0>")
 	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
 	ensureLineWritesStayAt(t, fake, []string{"$#"})
-	fake.InjectRX("<Idle|MPos:0,0,0>")
+	releaseFreshIdleBarrier(t, controller, fake, "$#", "M5")
 
 	var lines []string
 	select {
@@ -1919,7 +1963,6 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 	if !reflect.DeepEqual(lines, want) {
 		t.Fatalf("collected lines = %#v, want %#v", lines, want)
 	}
-	waitForLineWrites(t, fake, "$#", "M5")
 	fake.InjectRX("ok")
 	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
 }
