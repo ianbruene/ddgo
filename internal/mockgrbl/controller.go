@@ -205,9 +205,10 @@ func (c *Controller) handleLine(raw string) []string {
 		return c.handleJog(norm)
 	}
 	// GRBL rejects ordinary system commands while planner work is active. Jog
-	// commands retain their dedicated semantics above; recovery commands below
-	// are only restricted when there is real active/queued work.
-	if strings.HasPrefix(norm, "$") && norm != "$X" && norm != "$H" && (c.active != nil || len(c.queue) > 0) {
+	// commands retain their dedicated semantics above. Unlock remains available
+	// for recovery, but homing has the same planner-busy admission rule as every
+	// other ordinary system command.
+	if strings.HasPrefix(norm, "$") && norm != "$X" && (c.active != nil || len(c.queue) > 0) {
 		return c.errorLine(norm, "Busy", 9)
 	}
 	if strings.HasPrefix(norm, "G10L2") {

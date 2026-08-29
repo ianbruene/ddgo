@@ -715,6 +715,18 @@ func countStatusWrites(writes []transport.Message) int {
 	return count
 }
 
+func waitForStatusWritesAfter(t *testing.T, fake *transport.FakeTransport, before int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if countStatusWrites(fake.Written()) > before {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for status request after %d; writes=%#v", before, fake.Written())
+}
+
 func waitForEvent(t *testing.T, ch <-chan Event, kind EventKind) Event {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -812,6 +824,153 @@ func TestControllerProgramLoadStartComplete(t *testing.T) {
 	}
 }
 
+func startBarrierTestProgram(t *testing.T, program string, staleIdle bool) (*Controller, *transport.FakeTransport) {
+	t.Helper()
+	fake := transport.NewFakeTransport()
+	controller := NewController(fake, ports.StaticList(nil, nil))
+	controller.statusPollInterval = time.Hour
+	if err := controller.LoadProgramFile(writeProgramFile(t, "barrier.gcode", program)); err != nil {
+		t.Fatalf("LoadProgramFile() error = %v", err)
+	}
+	if err := controller.Connect(context.Background(), transport.DefaultPortConfig("fake")); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if staleIdle {
+		fake.InjectRX("<Idle|MPos:0,0,0>")
+		waitForState(t, controller, func(s State) bool { return s.MachineState == "Idle" })
+	}
+	drainEvents(controller.Events())
+	if err := controller.StartProgram(context.Background()); err != nil {
+		t.Fatalf("StartProgram() error = %v", err)
+	}
+	return controller, fake
+}
+
+func TestControllerProgramSystemCommandRequiresFreshIdleOnBothSides(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "G1 X1\n$G\nM5\n", true)
+	waitForLineWrites(t, fake, "G1 X1")
+	fake.InjectRX("ok")
+	waitForStatusWritesAfter(t, fake, 0)
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1"})
+
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1"})
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForLineWrites(t, fake, "G1 X1", "$G")
+
+	statusWrites := countStatusWrites(fake.Written())
+	fake.InjectRX("ok")
+	waitForStatusWritesAfter(t, fake, statusWrites)
+	ensureLineWritesStayAt(t, fake, []string{"G1 X1", "$G"})
+	if state := controller.Snapshot(); state.ProgramComplete != 1 || state.ProgramStatus != ProgramRunning {
+		t.Fatalf("state after system-command ok = %+v, want one completed line and running", state)
+	}
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForLineWrites(t, fake, "G1 X1", "$G", "M5")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramComplete == 3 && s.ProgramStatus == ProgramCompleted
+	})
+}
+
+func TestControllerSystemCommandBarrierDoesNotLoseBackToBackRunIdle(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	waitForStatusWritesAfter(t, fake, 0)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForLineWrites(t, fake, "$G")
+	statusWrites := countStatusWrites(fake.Written())
+	fake.InjectRX("ok")
+	waitForStatusWritesAfter(t, fake, statusWrites)
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerFinalSystemCommandCompletesOnlyAfterPostIdle(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "M5\n$G\n", false)
+	waitForLineWrites(t, fake, "M5")
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramComplete == 1 && s.ProgramStatus == ProgramRunning
+	})
+	waitForStatusWritesAfter(t, fake, 0)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForLineWrites(t, fake, "M5", "$G")
+	drainEvents(controller.Events())
+	statusWrites := countStatusWrites(fake.Written())
+	fake.InjectRX("ok")
+	waitForStatusWritesAfter(t, fake, statusWrites)
+	waitForState(t, controller, func(s State) bool {
+		return s.ProgramComplete == 1 && s.ProgramStatus == ProgramRunning
+	})
+	events := collectEventsFor(controller.Events(), noExtraLifecycleEventWindow)
+	assertEventTextCount(t, events, "program barrier.gcode completed", 0)
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramCompleted })
+}
+
+func TestControllerStopProgramCancelsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	waitForStatusWritesAfter(t, fake, 0)
+	ensureLineWritesStayAt(t, fake, nil)
+	if err := controller.StopProgram(context.Background()); err != nil {
+		t.Fatalf("StopProgram() error = %v", err)
+	}
+	waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramStopped })
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+	writes := fake.Written()
+	if len(writes) < 2 || writes[len(writes)-2].Display != "!" || writes[len(writes)-1].Display != "Ctrl-X" {
+		t.Fatalf("stop writes = %#v, want hold then Ctrl-X", writes)
+	}
+}
+
+func TestControllerDisconnectCancelsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	waitForStatusWritesAfter(t, fake, 0)
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectDisconnected()
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if state.LastError != ErrTransportDisconnected.Error() {
+		t.Fatalf("LastError = %q, want %q", state.LastError, ErrTransportDisconnected)
+	}
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+}
+
+func TestControllerAlarmStatusFailsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	waitForStatusWritesAfter(t, fake, 0)
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectRX("<Alarm|MPos:0,0,0>")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "Alarm while waiting for Idle") {
+		t.Fatalf("LastError = %q, want Alarm while waiting for Idle", state.LastError)
+	}
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+}
+
+func TestControllerTerminalFailureEndsSystemCommandPreBarrier(t *testing.T) {
+	controller, fake := startBarrierTestProgram(t, "$G\n", false)
+	waitForStatusWritesAfter(t, fake, 0)
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectRX("error:9")
+	state := waitForState(t, controller, func(s State) bool { return s.ProgramStatus == ProgramFailed })
+	if !strings.Contains(state.LastError, "while waiting for Idle: error:9") {
+		t.Fatalf("LastError = %q, want terminal failure during Idle wait", state.LastError)
+	}
+	if got := lineWrites(fake); len(got) != 0 {
+		t.Fatalf("program line writes = %#v, want none", got)
+	}
+}
+
 func TestControllerStartProgramDisablesContourPreservesPoints(t *testing.T) {
 	t.Parallel()
 
@@ -843,7 +1002,7 @@ func TestControllerStartProgramDisablesContourPreservesPoints(t *testing.T) {
 		t.Fatalf("contour points after start = %+v, want %+v", got, wantPoints)
 	}
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G0 X1"; got != want {
 		t.Fatalf("first written display = %q, want %q", got, want)
 	}
 }
@@ -949,7 +1108,7 @@ func TestControllerProgramPauseResumeStopAndModalBlocking(t *testing.T) {
 		t.Fatalf("pause status = %q, want %q", got, want)
 	}
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "!"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "!"; got != want {
 		t.Fatalf("pause write = %q, want %q", got, want)
 	}
 
@@ -1146,12 +1305,57 @@ func waitForWrites(t *testing.T, fake *transport.FakeTransport, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := len(fake.Written()); got >= want {
+		if got := len(nonStatusWrites(fake)); got >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d writes; got %d", want, len(fake.Written()))
+	t.Fatalf("timed out waiting for %d non-status writes; got %d", want, len(nonStatusWrites(fake)))
+}
+
+func nonStatusWrites(fake *transport.FakeTransport) []transport.Message {
+	var writes []transport.Message
+	for _, write := range fake.Written() {
+		if string(write.Payload) != "?" {
+			writes = append(writes, write)
+		}
+	}
+	return writes
+}
+
+// lineWrites excludes realtime traffic so barrier tests remain focused on the
+// ordering of program-owned line commands even if polling changes later.
+func lineWrites(fake *transport.FakeTransport) []string {
+	var lines []string
+	for _, write := range fake.Written() {
+		if strings.HasSuffix(string(write.Payload), "\n") {
+			lines = append(lines, write.Display)
+		}
+	}
+	return lines
+}
+
+func waitForLineWrites(t *testing.T, fake *transport.FakeTransport, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := lineWrites(fake); reflect.DeepEqual(got, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("line writes = %#v, want %#v", lineWrites(fake), want)
+}
+
+func ensureLineWritesStayAt(t *testing.T, fake *transport.FakeTransport, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(noExtraLifecycleEventWindow)
+	for time.Now().Before(deadline) {
+		if got := lineWrites(fake); !reflect.DeepEqual(got, want) {
+			t.Fatalf("line writes changed to %#v, want %#v", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // keepReportingIdle supplies the fresh status reports required by tests whose
@@ -1361,14 +1565,14 @@ func TestControllerDefaultMacrosReadWCSAndWriteWCS(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-macros-wcs.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("first written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G54:1.000,2.000,-3.500]")
 	fake.InjectRX("[G55:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G10 L2 P2 Z-3.500000"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G10 L2 P2 Z-3.500000"; got != want {
 		t.Fatalf("second written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -1396,7 +1600,7 @@ func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-m100-midpoint.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("first written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G54:1.000,0.000,0.000]")
@@ -1404,12 +1608,12 @@ func TestControllerDefaultM100WritesMidpointAndVerifies(t *testing.T) {
 	fake.InjectRX("[G56:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G10 L2 P3 X2.000000"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G10 L2 P3 X2.000000"; got != want {
 		t.Fatalf("second written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 3)
-	if got, want := fake.Written()[2].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[2].Display, "$#"; got != want {
 		t.Fatalf("third written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G56:2.000,0.000,0.000]")
@@ -1443,7 +1647,7 @@ func TestControllerDefaultM100VerificationFailureFailsProgram(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-m100-verify-fail.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("first written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G54:1.000,0.000,0.000]")
@@ -1451,12 +1655,12 @@ func TestControllerDefaultM100VerificationFailureFailsProgram(t *testing.T) {
 	fake.InjectRX("[G56:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G10 L2 P3 X2.000000"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G10 L2 P3 X2.000000"; got != want {
 		t.Fatalf("second written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 3)
-	if got, want := fake.Written()[2].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[2].Display, "$#"; got != want {
 		t.Fatalf("third written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G56:2.100,0.000,0.000]")
@@ -1492,14 +1696,14 @@ func TestControllerDefaultM101PassAllowsNextLine(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program default-m101-pass.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("first written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G54:1.000,0.000,0.000]")
 	fake.InjectRX("[G55:1.005,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G0 X1"; got != want {
 		t.Fatalf("second written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -1566,7 +1770,7 @@ func TestControllerUnregisteredMCodePassesThrough(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program unregistered-m.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "M42 P1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "M42 P1"; got != want {
 		t.Fatalf("written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -1673,12 +1877,12 @@ func TestControllerMacroHandlerCanSendControllerLines(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-send.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G0 X1"; got != want {
 		t.Fatalf("first write = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G0 Y2"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G0 Y2"; got != want {
 		t.Fatalf("second write = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -1686,9 +1890,7 @@ func TestControllerMacroHandlerCanSendControllerLines(t *testing.T) {
 }
 
 func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
-	t.Parallel()
-
-	path := writeProgramFile(t, "macro-query.gcode", "M90\n")
+	path := writeProgramFile(t, "macro-query.gcode", "M90\nM5\n")
 	fake := transport.NewFakeTransport()
 	controller := NewController(fake, ports.StaticList(nil, nil))
 	controller.statusPollInterval = 10 * time.Second
@@ -1711,19 +1913,34 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	_ = waitForEvent(t, controller.Events(), EventStateChanged)
-	keepReportingIdle(t, fake)
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Idle" })
 	if err := controller.StartProgram(context.Background()); err != nil {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-query.gcode")
-	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
-		t.Fatalf("query write = %q, want %q", got, want)
-	}
+	waitForStatusWritesAfter(t, fake, 0)
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectRX("<Run|MPos:0,0,0>")
+	waitForState(t, controller, func(s State) bool { return s.MachineState == "Run" })
+	ensureLineWritesStayAt(t, fake, nil)
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForLineWrites(t, fake, "$#")
 
 	fake.InjectRX("[G54:1.000,2.000,3.000]")
+	fake.InjectRX("<Hold|MPos:0,0,0>")
 	fake.InjectRX("[G55:4.000,5.000,6.000]")
+	statusWrites := countStatusWrites(fake.Written())
 	fake.InjectRX("ok")
+	waitForStatusWritesAfter(t, fake, statusWrites)
+	ensureLineWritesStayAt(t, fake, []string{"$#"})
+	select {
+	case lines := <-received:
+		t.Fatalf("query returned before post-command Idle with lines %#v", lines)
+	default:
+	}
+	fake.InjectRX("<Idle|MPos:0,0,0>")
+	waitForLineWrites(t, fake, "$#", "M5")
 
 	var lines []string
 	select {
@@ -1735,7 +1952,8 @@ func TestControllerMacroQueryCollectsIntermediateResponses(t *testing.T) {
 	if !reflect.DeepEqual(lines, want) {
 		t.Fatalf("collected lines = %#v, want %#v", lines, want)
 	}
-	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 1 && s.ProgramStatus == ProgramCompleted })
+	fake.InjectRX("ok")
+	waitForState(t, controller, func(s State) bool { return s.ProgramComplete == 2 && s.ProgramStatus == ProgramCompleted })
 }
 
 func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
@@ -1765,7 +1983,7 @@ func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-query-error.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("query write = %q, want %q", got, want)
 	}
 
@@ -1779,7 +1997,7 @@ func TestControllerMacroQueryFailsOnControllerError(t *testing.T) {
 	if !strings.Contains(state.LastError, "query command failed: error:2") {
 		t.Fatalf("LastError = %q, want query failure text", state.LastError)
 	}
-	ensureWritesStayAt(t, fake, 1, 100*time.Millisecond)
+	ensureLineWritesStayAt(t, fake, []string{"$#"})
 }
 
 func setupProbeMacroProgram(t *testing.T, name, program string) (*Controller, *transport.FakeTransport, <-chan macro.Point) {
@@ -1830,7 +2048,7 @@ func TestControllerRunProbeCapturesLastProbePoint(t *testing.T) {
 
 	controller, fake, gotPoint := setupProbeMacroProgram(t, "macro-probe-success.gcode", "M92 G38.2 Z-5 F100\n")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G38.2 Z-5 F100"; got != want {
 		t.Fatalf("probe write = %q, want %q", got, want)
 	}
 	fake.InjectRX("[PRB:1.000,2.000,-3.500:1]")
@@ -1852,7 +2070,7 @@ func TestControllerRunProbeNoContactFailsAndDoesNotUpdateLastProbe(t *testing.T)
 
 	controller, fake, _ := setupProbeMacroProgram(t, "macro-probe-no-contact.gcode", "M92 G38.2 Z-5 F100\n")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G38.2 Z-5 F100"; got != want {
 		t.Fatalf("probe write = %q, want %q", got, want)
 	}
 	fake.InjectRX("[PRB:1.000,2.000,-3.500:0]")
@@ -1973,7 +2191,7 @@ func TestControllerReadWCSOffsetsUsesQueryHelper(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program macro-read-wcs.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("query write = %q, want %q", got, want)
 	}
 
@@ -2016,7 +2234,7 @@ func TestControllerNormalProgramSendIgnoresIntermediateRX(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program normal-intermediate.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G0 X1"; got != want {
 		t.Fatalf("written line = %q, want %q", got, want)
 	}
 
@@ -2051,7 +2269,7 @@ func TestControllerNormalLongRunningLineIgnoresNonTerminalRXBurst(t *testing.T) 
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program normal-rx-burst.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G0 X1"; got != want {
 		t.Fatalf("written line = %q, want %q", got, want)
 	}
 
@@ -2115,7 +2333,7 @@ func TestControllerSendLineCollectingResponsesClearsQueryChannelOnFailure(t *tes
 		errCh <- err
 	}()
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("query write = %q, want %q", got, want)
 	}
 	fake.InjectRX("error:2")
@@ -2157,7 +2375,7 @@ func TestControllerMotionRewrite(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program rewrite.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G0 X2"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G0 X2"; got != want {
 		t.Fatalf("written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -2241,7 +2459,7 @@ func TestControllerDefaultMacrosDoNotInterceptDottedMCode(t *testing.T) {
 	}
 	_ = waitForEventText(t, controller.Events(), EventStateChanged, "started program dotted-mcode.gcode")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "M107.1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "M107.1"; got != want {
 		t.Fatalf("written line = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -2384,7 +2602,7 @@ func TestControllerDefaultM102NumericExpressionWritesWithoutWCSQuery(t *testing.
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G10 L2 P1 Z9.000000"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G10 L2 P1 Z9.000000"; got != want {
 		t.Fatalf("written = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -2415,15 +2633,15 @@ func TestControllerDefaultM102WCSExpressionReadsOnceAndWrites(t *testing.T) {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
-	if fake.Written()[0].Display != "$#" {
-		t.Fatalf("first = %q", fake.Written()[0].Display)
+	if nonStatusWrites(fake)[0].Display != "$#" {
+		t.Fatalf("first = %q", nonStatusWrites(fake)[0].Display)
 	}
 	fake.InjectRX("[G54:0.000,0.000,1.000]")
 	fake.InjectRX("[G55:0.000,0.000,5.000]")
 	fake.InjectRX("[G56:0.000,0.000,0.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G10 L2 P3 Z3.000000"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G10 L2 P3 Z3.000000"; got != want {
 		t.Fatalf("second = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -2487,14 +2705,14 @@ func TestControllerDefaultM106PassAllowsNextLine(t *testing.T) {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
-	if fake.Written()[0].Display != "$#" {
-		t.Fatalf("first = %q", fake.Written()[0].Display)
+	if nonStatusWrites(fake)[0].Display != "$#" {
+		t.Fatalf("first = %q", nonStatusWrites(fake)[0].Display)
 	}
 	fake.InjectRX("[G54:0.000,0.000,1.000]")
 	fake.InjectRX("[G55:0.000,0.000,2.000]")
 	fake.InjectRX("ok")
 	waitForWrites(t, fake, 2)
-	if got, want := fake.Written()[1].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[1].Display, "G0 X1"; got != want {
 		t.Fatalf("second = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -2525,7 +2743,7 @@ func TestControllerDefaultM106FailurePreventsNextLine(t *testing.T) {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "$#"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "$#"; got != want {
 		t.Fatalf("first = %q, want %q", got, want)
 	}
 	fake.InjectRX("[G54:0.000,0.000,3.000]")
@@ -2559,7 +2777,7 @@ func TestControllerDefaultM106NumericAssertionDoesNotReadWCS(t *testing.T) {
 		t.Fatalf("StartProgram() error = %v", err)
 	}
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G0 X1"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G0 X1"; got != want {
 		t.Fatalf("first = %q, want %q", got, want)
 	}
 	fake.InjectRX("ok")
@@ -2599,7 +2817,7 @@ func TestControllerDefaultM109CollectsContourPoint(t *testing.T) {
 	t.Parallel()
 	controller, fake := setupDefaultMacroProgram(t, "default-m109-success.gcode", "M109 G38.2 Z-5 F100\n")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G38.2 Z-5 F100"; got != want {
 		t.Fatalf("probe write = %q, want %q", got, want)
 	}
 	fake.InjectRX("[PRB:1.000,2.000,-3.500:1]")
@@ -2618,7 +2836,7 @@ func TestControllerDefaultM109NoContactFailsWithoutContourPoint(t *testing.T) {
 	t.Parallel()
 	controller, fake := setupDefaultMacroProgram(t, "default-m109-no-contact.gcode", "M109 G38.2 Z-5 F100\nG0 X9\n")
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G38.2 Z-5 F100"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G38.2 Z-5 F100"; got != want {
 		t.Fatalf("probe write = %q, want %q", got, want)
 	}
 	fake.InjectRX("[PRB:1.000,2.000,-3.500:0]")
@@ -2668,7 +2886,7 @@ func TestControllerUndefinedM103ThroughM105UseUnregisteredPassThrough(t *testing
 			t.Parallel()
 			controller, fake := setupDefaultMacroProgram(t, "default-"+strings.ToLower(code)+"-passthrough.gcode", code+"\n")
 			waitForWrites(t, fake, 1)
-			if got := fake.Written()[0].Display; got != code {
+			if got := nonStatusWrites(fake)[0].Display; got != code {
 				t.Fatalf("written command = %q, want %q", got, code)
 			}
 			fake.InjectRX("error:20")
@@ -2980,6 +3198,9 @@ func (t *blockingProgramTransport) Close() error {
 }
 func (t *blockingProgramTransport) Write(ctx context.Context, msg transport.Message) error {
 	t.writes <- msg.Display
+	if string(msg.Payload) == "?" {
+		return nil
+	}
 	select {
 	case <-t.releaseWrite:
 		return nil
@@ -3000,12 +3221,18 @@ func (appTestQueryRewriter) RewriteMotion(ctx context.Context, runtime macro.Run
 
 func waitForTransportWrite(t *testing.T, writes <-chan string) string {
 	t.Helper()
-	select {
-	case write := <-writes:
-		return write
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for transport write")
-		return ""
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case write := <-writes:
+			if write != "?" {
+				return write
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for non-status transport write")
+			return ""
+		}
 	}
 }
 
@@ -3037,7 +3264,7 @@ func TestControllerConsoleMacroM102NumericUsesSharedEngine(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 1 + 2 * 3") }()
 	waitForWrites(t, fake, 1)
-	if got, want := fake.Written()[0].Display, "G10 L2 P1 Z7.000000"; got != want {
+	if got, want := nonStatusWrites(fake)[0].Display, "G10 L2 P1 Z7.000000"; got != want {
 		t.Fatalf("console M102 write = %q, want %q", got, want)
 	}
 	fake.InjectRX("<Idle|MPos:0.000,0.000,0.000>")
@@ -3111,7 +3338,7 @@ func TestControllerConsoleUnregisteredAndPrefixMacrosPassThrough(t *testing.T) {
 	}
 	waitForWrites(t, fake, len(commands))
 	for i, cmd := range commands {
-		if got := fake.Written()[i].Display; got != cmd {
+		if got := nonStatusWrites(fake)[i].Display; got != cmd {
 			t.Fatalf("write[%d] = %q, want %q", i, got, cmd)
 		}
 	}
@@ -3207,7 +3434,7 @@ func TestControllerStartProgramRejectedWhileInteractiveMacroQueryActive(t *testi
 	done := make(chan error, 1)
 	go func() { done <- controller.SendConsoleLine(context.Background(), "M101 G54Z G55Z 0.1") }()
 	waitForWrites(t, fake, 1)
-	if got := fake.Written()[0].Display; got != "$#" {
+	if got := nonStatusWrites(fake)[0].Display; got != "$#" {
 		t.Fatalf("first write = %q, want $#", got)
 	}
 
@@ -3296,7 +3523,8 @@ func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- controller.SendConsoleLine(context.Background(), "M102 G54Z = 4") }()
 	waitForWrites(t, fake, 1)
-	before := len(fake.Written())
+	before := len(nonStatusWrites(fake))
+	rawBefore := len(fake.Written())
 	for _, cmd := range []string{"G0 X9", "M103", "M999", "$I", "M107.1"} {
 		if err := controller.SendConsoleLine(context.Background(), cmd); !errors.Is(err, ErrInteractiveCommandActive) {
 			t.Fatalf("SendConsoleLine(%q) error = %v, want %v", cmd, err, ErrInteractiveCommandActive)
@@ -3308,7 +3536,7 @@ func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
 	if err := controller.Action(context.Background(), grbl.ActionStatus); err != nil {
 		t.Fatalf("Action(status) error = %v, want realtime status allowed during interactive macro", err)
 	}
-	ensureWritesStayAt(t, fake, before+1, noExtraLifecycleEventWindow)
+	ensureWritesStayAt(t, fake, rawBefore+1, noExtraLifecycleEventWindow)
 	fake.InjectRX("ok")
 	_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	if err := waitForErrorResult(t, done); err != nil {
@@ -3321,7 +3549,7 @@ func TestControllerManualWritesRejectedDuringInteractiveMacro(t *testing.T) {
 		fake.InjectRX("ok")
 		_ = waitForEvent(t, controller.Events(), EventConsoleRX)
 	}
-	waitForWrites(t, fake, before+4)
+	waitForWrites(t, fake, before+3)
 }
 
 func waitForErrorResult(t *testing.T, ch <-chan error) error {

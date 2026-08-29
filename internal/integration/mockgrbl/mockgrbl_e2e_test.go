@@ -2111,6 +2111,59 @@ func TestDDGoProgramTimeoutFailureThenSuccessfulRunAgainstMock(t *testing.T) {
 	}
 }
 
+func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
+	m := startMockGRBL(t)
+	controller := connectControllerToMock(t, m)
+	requestStatus(t, controller)
+	requireControllerIdle(t, controller)
+
+	// mockgrbl's deliberately narrow motion surface currently models asynchronous
+	// accepted motion through $J= rather than ordinary G1 commands.
+	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "$J=G53 G90 X-10 F600\n$G\nM5\n")
+	if err := controller.LoadProgramFile(path); err != nil {
+		t.Fatalf("load barrier program: %v", err)
+	}
+	eventsAfter := mockEventCount(t, m)
+	responsesAfter := mockResponseCount(t, m)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := controller.StartProgram(ctx); err != nil {
+		t.Fatalf("start barrier program: %v", err)
+	}
+
+	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$J=G53G90X-10F600")
+	})
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil
+	})
+
+	events := waitForNewMockEvents(t, m, eventsAfter, 10*time.Second, func(events []mockLogEntry) bool {
+		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "M5")
+	})
+	index := func(command string) int {
+		for i, event := range events {
+			if event.Kind == "command" && event.Text == command {
+				return i
+			}
+		}
+		return -1
+	}
+	motion, system, following := index("$J=G53G90X-10F600"), index("$G"), index("M5")
+	if motion < 0 || system <= motion || following <= system {
+		t.Fatalf("program command order invalid: motion=%d system=%d following=%d events=%+v", motion, system, following, events)
+	}
+	// Mock history records when the PTY generates a status response, not when the
+	// serial transport delivers it to DDGo. Do not infer barrier receive ordering
+	// from the relative log positions of '?' or '<Idle|...>'; the focused fake-
+	// transport tests control and assert that post-command invariant directly.
+	responses := m.responses(t)[responsesAfter:]
+	if hasMockResponse(responses, "[MSG:Busy]") || hasMockResponse(responses, "error:9") {
+		t.Fatalf("barrier program triggered planner Busy response: %+v", responses)
+	}
+	requireProgramCompleted(t, controller, 3)
+}
+
 func TestDDGoProgramQueryFailsWhenTransportDropsAgainstMock(t *testing.T) {
 	m := startMockGRBLHoldingResponseFor(t, "$#")
 	// Do not suppress the response here. HoldResponseFor lets mockgrbl generate
@@ -3219,6 +3272,13 @@ func TestDDGoHomeActionAgainstMock(t *testing.T) {
 	}
 	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
 		return !near(state.MachinePosition[0], 0, posTol)
+	})
+	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove == nil && state.QueuedCommandCount == 0 && near(state.MachinePosition[0], -1, posTol)
+	})
+	requestStatus(t, controller)
+	waitForControllerState(t, controller, 5*time.Second, func(snapshot app.State) bool {
+		return snapshot.MachineState == "Idle" && snapshot.HasMachinePosition && near(snapshot.MachinePosition[0], -1, posTol)
 	})
 
 	eventsAfter, responsesAfter := mockEventCount(t, m), mockResponseCount(t, m)

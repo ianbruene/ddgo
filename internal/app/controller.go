@@ -111,6 +111,7 @@ type Controller struct {
 	lastProbe                               macro.Point
 	hasLastProbe                            bool
 	pendingQuietStatusReports               int
+	statusReportRevision                    uint64
 	statusReportChanged                     chan struct{}
 	suppressTransportDisconnectedGeneration transport.ConnectionGeneration
 }
@@ -512,6 +513,7 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 		c.mu.Unlock()
 		return err
 	}
+	c.pendingQuietStatusReports++
 	c.mu.Unlock()
 	defer c.endRealtimeWrite()
 	msg, err := grbl.BuildAction(grbl.ActionStatus)
@@ -520,16 +522,38 @@ func (c *Controller) writeStatusPoll(ctx context.Context) error {
 	}
 	msg.SuppressLog = true
 	if err := c.transport.Write(ctx, msg); err != nil {
+		c.mu.Lock()
+		if c.pendingQuietStatusReports > 0 {
+			c.pendingQuietStatusReports--
+		}
+		c.mu.Unlock()
 		if errors.Is(err, transport.ErrNotOpen) {
 			return nil
 		}
 		c.emitError(err)
 		return err
 	}
-	c.mu.Lock()
-	c.pendingQuietStatusReports = 1
-	c.mu.Unlock()
 	return nil
+}
+
+func (c *Controller) writeStatusPollWhenAvailable(ctx context.Context) error {
+	for {
+		err := c.writeStatusPoll(ctx)
+		if !errors.Is(err, ErrControllerIOActive) {
+			return err
+		}
+		c.mu.RLock()
+		done := c.realtimeWriteDone
+		c.mu.RUnlock()
+		if done == nil {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+		}
+	}
 }
 
 func (c *Controller) Action(ctx context.Context, action grbl.Action) error {
@@ -1008,18 +1032,36 @@ func (r *commandRuntime) sendLineCollectingResponses(ctx context.Context, line s
 
 func isGRBLSystemCommand(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "$") }
 
-// waitForFreshIdle deliberately snapshots the next-report notification before
-// inspecting any state. Thus an Idle cached before this barrier can never pass it.
 func (r *commandRuntime) waitForFreshIdle(ctx context.Context) error {
 	c := r.controller
+	c.mu.RLock()
+	if r.run == nil || c.run != r.run || c.connectionGeneration != r.run.generation {
+		c.mu.RUnlock()
+		return context.Canceled
+	}
+	baseline := c.statusReportRevision
+	c.mu.RUnlock()
+	if err := c.writeStatusPollWhenAvailable(ctx); err != nil {
+		return fmt.Errorf("request status while waiting for Idle: %w", err)
+	}
 	for {
 		c.mu.RLock()
 		if r.run == nil || c.run != r.run || c.connectionGeneration != r.run.generation {
 			c.mu.RUnlock()
 			return context.Canceled
 		}
+		revision := c.statusReportRevision
+		state := c.state.MachineState
 		changed := c.statusReportChanged
 		c.mu.RUnlock()
+		if revision > baseline {
+			if strings.EqualFold(state, "Alarm") {
+				return errors.New("machine entered Alarm while waiting for Idle")
+			}
+			if strings.EqualFold(state, "Idle") {
+				return nil
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1030,19 +1072,6 @@ func (r *commandRuntime) waitForFreshIdle(ctx context.Context) error {
 				return fmt.Errorf("program failed while waiting for Idle: %s", strings.TrimSpace(rx))
 			}
 		case <-changed:
-			c.mu.RLock()
-			current := c.run == r.run && c.connectionGeneration == r.run.generation
-			state := c.state.MachineState
-			c.mu.RUnlock()
-			if !current {
-				return context.Canceled
-			}
-			if strings.EqualFold(state, "Alarm") {
-				return errors.New("machine entered Alarm while waiting for Idle")
-			}
-			if strings.EqualFold(state, "Idle") {
-				return nil
-			}
 		}
 	}
 }
@@ -1328,8 +1357,6 @@ func (c *Controller) runTransportEventBridge() {
 					suppressRXLog = true
 				}
 				c.state.MachineState = report.State
-				close(c.statusReportChanged)
-				c.statusReportChanged = make(chan struct{})
 				c.state.LastStatusRaw = report.Raw
 				if report.HasMPos {
 					c.state.MachinePosition = report.MPos
@@ -1348,6 +1375,9 @@ func (c *Controller) runTransportEventBridge() {
 					c.state.Spindle = report.Spindle
 					c.state.HasFeedSpindle = true
 				}
+				c.statusReportRevision++
+				close(c.statusReportChanged)
+				c.statusReportChanged = make(chan struct{})
 			}
 			var overflowRun *programRun
 			if !statusReport {
