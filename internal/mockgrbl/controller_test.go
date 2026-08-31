@@ -836,6 +836,132 @@ func TestNormalMotionUsesSharedPlannerQueue(t *testing.T) {
 	}
 }
 
+func TestNormalMotionModesAreOrderIndependent(t *testing.T) {
+	tests := []struct {
+		name     string
+		commands []string
+		wantX    float64
+	}{
+		{"absolute mode first", []string{"G90G1X-10F60\n"}, -10},
+		{"absolute motion first", []string{"G1G90X-10F60\n"}, -10},
+		{"relative mode first", []string{"G91G1X-1F60\n"}, -1},
+		{"relative motion first", []string{"G1G91X-1F60\n"}, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, clk := testCtl()
+			for _, command := range tt.commands {
+				if out := joined(c.ProcessBytes([]byte(command))); out != "ok\r\n" {
+					t.Fatalf("%q response = %q", command, out)
+				}
+			}
+			clk.Advance(time.Hour)
+			if got := c.Snapshot().MachinePosition[0]; got != tt.wantX {
+				t.Fatalf("final X = %v, want %v", got, tt.wantX)
+			}
+		})
+	}
+}
+
+func TestStandaloneDistanceModesAndQueuedRelativePlanning(t *testing.T) {
+	c, clk := testCtl()
+	if out := joined(c.ProcessBytes([]byte("G91\n"))); out != "ok\r\n" {
+		t.Fatalf("G91 response = %q", out)
+	}
+	standalone := c.Snapshot()
+	if standalone.ActiveMove != nil || standalone.QueuedCommandCount != 0 || standalone.MachinePosition != [3]float64{} {
+		t.Fatalf("standalone G91 changed planner or position: %+v", standalone)
+	}
+	// Submit both commands at the same simulated instant. The queued target must
+	// be based on the first planner endpoint, not its unadvanced physical position.
+	for i := 0; i < 2; i++ {
+		if out := joined(c.ProcessBytes([]byte("G1X-1F60\n"))); out != "ok\r\n" {
+			t.Fatalf("relative move %d response = %q", i, out)
+		}
+	}
+	if snap := c.Snapshot(); snap.ActiveMove == nil || snap.QueuedCommandCount != 1 {
+		t.Fatalf("relative moves were not active and queued: %+v", snap)
+	}
+	clk.Advance(time.Hour)
+	if got := c.Snapshot().MachinePosition[0]; got != -2 {
+		t.Fatalf("queued relative final X = %v, want -2", got)
+	}
+	if out := joined(c.ProcessBytes([]byte("G90\nG1X-5F60\n"))); out != "ok\r\nok\r\n" {
+		t.Fatalf("return to absolute responses = %q", out)
+	}
+	clk.Advance(time.Hour)
+	if got := c.Snapshot().MachinePosition[0]; got != -5 {
+		t.Fatalf("absolute final X = %v, want -5", got)
+	}
+}
+
+func TestDistanceModeReportConflictAndReset(t *testing.T) {
+	c, _ := testCtl()
+	assertReport := func(want string) {
+		t.Helper()
+		out := joined(c.ProcessBytes([]byte("$G\n")))
+		if !strings.Contains(out, " G"+want+" G94") {
+			t.Fatalf("$G response = %q, want G%s", out, want)
+		}
+	}
+	assertReport("90")
+	if out := joined(c.ProcessBytes([]byte("G91\n"))); out != "ok\r\n" {
+		t.Fatalf("G91 response = %q", out)
+	}
+	assertReport("91")
+	before := c.Snapshot()
+	if out := joined(c.ProcessBytes([]byte("G90G91X-1F60\n"))); !strings.Contains(out, "error:20") {
+		t.Fatalf("conflicting distance modes response = %q", out)
+	}
+	after := c.Snapshot()
+	if after.ActiveMove != nil || after.QueuedCommandCount != 0 || after.MachinePosition != before.MachinePosition {
+		t.Fatalf("conflicting block mutated motion: before=%+v after=%+v", before, after)
+	}
+	assertReport("91")
+	c.ProcessBytes([]byte{0x18})
+	c.ProcessBytes([]byte("$X\n"))
+	assertReport("90")
+	if out := joined(c.ProcessBytes([]byte("G1X-5F60\n"))); out != "ok\r\n" {
+		t.Fatalf("post-reset absolute move response = %q", out)
+	}
+	if move := c.Snapshot().ActiveMove; move == nil || move.Target[0] != -5 {
+		t.Fatalf("post-reset move did not use G90 target: %+v", move)
+	}
+}
+
+func TestNormalMotionWordValidation(t *testing.T) {
+	accepted := []string{"G1X-1", "G1X-1F60"}
+	for _, command := range accepted {
+		t.Run(command, func(t *testing.T) {
+			c, _ := testCtl()
+			if out := joined(c.ProcessBytes([]byte(command + "\n"))); out != "ok\r\n" {
+				t.Fatalf("response = %q", out)
+			}
+			if c.Snapshot().ActiveMove == nil {
+				t.Fatal("accepted move did not start")
+			}
+		})
+	}
+	invalid := []string{
+		"G1X-1F0", "G1X-1F-1", "G1X-1Fgarbage", "G1X-1FNaN", "G1X-1FInf",
+		"G1XfooF60", "G1XNaNF60", "G1XInfF60",
+	}
+	for _, command := range invalid {
+		t.Run(command, func(t *testing.T) {
+			c, _ := testCtl()
+			before := c.Snapshot()
+			out := joined(c.ProcessBytes([]byte(command + "\n")))
+			if !strings.Contains(out, "error:20") {
+				t.Fatalf("response = %q, want rejection", out)
+			}
+			after := c.Snapshot()
+			if after.ActiveMove != nil || after.QueuedCommandCount != 0 || after.MachinePosition != before.MachinePosition {
+				t.Fatalf("rejected move mutated planner: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 func TestSoftResetEmitsResetAlarmStartupAndClearsMotion(t *testing.T) {
 	c, _ := testCtl()
 	for _, command := range []string{"$J=G53 G90 X-10 F60\n", "$J=G53 G90 Y-10 F60\n"} {
