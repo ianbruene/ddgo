@@ -35,6 +35,7 @@ type Controller struct {
 	spindleRunning             bool
 	spindleStatusRPM           float64
 	spindleStatusSet           bool
+	distanceAbsolute           bool
 }
 
 func NewController(fw FirmwareProfile, mach MachineProfile, clock Clock) *Controller {
@@ -80,7 +81,7 @@ func NewController(fw FirmwareProfile, mach MachineProfile, clock Clock) *Contro
 	if clock == nil {
 		clock = RealClock{}
 	}
-	return &Controller{fw: fw, mach: mach, clock: clock, state: StateIdle, pos: mach.InitialPosition}
+	return &Controller{fw: fw, mach: mach, clock: clock, state: StateIdle, pos: mach.InitialPosition, distanceAbsolute: true}
 }
 func (c *Controller) Connect() []string {
 	c.mu.Lock()
@@ -217,6 +218,9 @@ func (c *Controller) handleLine(raw string) []string {
 	if strings.HasPrefix(norm, "G38.2") {
 		return c.handleProbe(norm)
 	}
+	if handled, response := c.handleNormalMotion(norm); handled {
+		return response
+	}
 	if ok, rpm, start := parseSpindleCommand(norm); ok {
 		if rpm != nil {
 			c.spindleRPM = *rpm
@@ -258,6 +262,69 @@ func (c *Controller) handleLine(raw string) []string {
 	default:
 		return c.errorLine(norm, "Unsupported", 20)
 	}
+}
+
+// handleNormalMotion models the planner semantics needed for ordinary linear
+// program streaming: acceptance is acknowledged immediately, while the shared
+// move queue continues to report Run until physical motion completes.
+func (c *Controller) handleNormalMotion(norm string) (bool, []string) {
+	w := parseWords(norm)
+	g, hasG := w['G']
+	if !hasG || (g != 0 && g != 1) {
+		return false, nil
+	}
+	if c.state == StateAlarm {
+		return true, c.errorLine(norm, "Busy", 9)
+	}
+
+	abs := c.distanceAbsolute
+	if strings.Contains(norm, "G91") {
+		abs = false
+	} else if strings.Contains(norm, "G90") {
+		abs = true
+	}
+	base := c.plannerBasePositionLocked()
+	target := base
+	axes := 0
+	for i, axis := range []byte{'X', 'Y', 'Z'} {
+		if value, ok := w[axis]; ok {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return true, c.errorLine(norm, "Invalid motion", 20)
+			}
+			axes++
+			if abs {
+				target[i] = value
+			} else {
+				target[i] += value
+			}
+		}
+	}
+	if axes == 0 {
+		return true, c.errorLine(norm, "Motion axis required", 20)
+	}
+	feed := w['F']
+	if feed <= 0 {
+		feed = c.mach.DefaultFeed
+	}
+	if math.IsNaN(feed) || math.IsInf(feed, 0) {
+		return true, c.errorLine(norm, "Invalid motion", 20)
+	}
+	if bad := c.limitAxis(target); bad != "" {
+		c.log("limit", bad)
+		return true, c.errorLine(norm, "Soft limit", 15)
+	}
+	distance := math.Sqrt(sq(target[0]-base[0]) + sq(target[1]-base[1]) + sq(target[2]-base[2]))
+	move := Move{Original: norm, Kind: MoveNormal, Start: base, Target: target, StartTime: c.clock.Now(), Duration: distance / feed * 60, Feed: feed}
+	if c.active == nil {
+		c.startMove(move)
+	} else if c.freePlannerBlocksLocked() > 0 {
+		c.queue = append(c.queue, queuedMove{line: norm, move: move})
+		c.log("queue", "enqueue "+norm)
+	} else {
+		return true, c.errorLine(norm, "Queue full", 24)
+	}
+	c.distanceAbsolute = abs
+	return true, c.emit(c.fw.OK())
 }
 
 // parseSpindleCommand recognizes the small spindle command surface exercised by DDGo.
@@ -529,6 +596,7 @@ func (c *Controller) resetLocked() []string {
 	c.rx = nil
 	c.rxOverflow = false
 	c.pendingSerial = nil
+	c.distanceAbsolute = true
 	c.setState(StateIdle)
 	c.lastErr = "ALARM:3"
 	c.log("reset", "reset")
