@@ -59,6 +59,13 @@ jobs:
         run: |
           go test -race -count=20 ./internal/app -run 'ConnectionTransition|ConnectAttempt|ConcurrentConnect|RealtimeWrite|SoftReset'
 
+      - name: Repeated system-command barrier tests
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go test -count=100 ./internal/app -run 'SystemCommand|MacroQuery'
+          go test -race -count=20 ./internal/app -run 'SystemCommand|MacroQuery'
+
       - name: Repeated connection generation isolation tests
         if: matrix.os == 'ubuntu-latest'
         shell: bash

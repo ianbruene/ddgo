@@ -2117,9 +2117,7 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 	requestStatus(t, controller)
 	requireControllerIdle(t, controller)
 
-	// mockgrbl's deliberately narrow motion surface currently models asynchronous
-	// accepted motion through $J= rather than ordinary G1 commands.
-	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "$J=G53 G90 X-10 F600\n$G\nM5\n")
+	path := writeIntegrationProgramFile(t, "system-command-barrier.gcode", "G1 X-10 F600\n$G\nM5\n")
 	if err := controller.LoadProgramFile(path); err != nil {
 		t.Fatalf("load barrier program: %v", err)
 	}
@@ -2132,11 +2130,14 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 	}
 
 	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "$J=G53G90X-10F600")
+		return hasMockLogEntry(events, "command", "G1X-10F600") && hasMockLogEntry(events, "response", "ok")
 	})
-	waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
-		return state.ActiveMove != nil
+	active := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
+		return state.ActiveMove != nil && state.State == "Run" && state.MachinePosition[0] > -10
 	})
+	if active.MachinePosition[0] <= -10 {
+		t.Fatalf("ordinary motion already reached target before $G barrier became pending: %+v", active)
+	}
 
 	events := waitForNewMockEvents(t, m, eventsAfter, 10*time.Second, func(events []mockLogEntry) bool {
 		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "M5")
@@ -2149,7 +2150,7 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 		}
 		return -1
 	}
-	motion, system, following := index("$J=G53G90X-10F600"), index("$G"), index("M5")
+	motion, system, following := index("G1X-10F600"), index("$G"), index("M5")
 	if motion < 0 || system <= motion || following <= system {
 		t.Fatalf("program command order invalid: motion=%d system=%d following=%d events=%+v", motion, system, following, events)
 	}

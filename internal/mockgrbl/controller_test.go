@@ -784,6 +784,58 @@ func TestSystemCommandRejectedWhilePlannerMotionActive(t *testing.T) {
 	}
 }
 
+func TestNormalMotionAcknowledgedBeforePhysicalCompletion(t *testing.T) {
+	c, clk := testCtl()
+	if out := joined(c.ProcessBytes([]byte("G1 X-10 F60\n"))); out != "ok\r\n" {
+		t.Fatalf("motion response = %q, want immediate ok", out)
+	}
+	accepted := c.Snapshot()
+	if accepted.ActiveMove == nil || accepted.State != StateRun {
+		t.Fatalf("accepted motion snapshot = %+v, want active Run motion", accepted)
+	}
+	if accepted.MachinePosition[0] == -10 {
+		t.Fatalf("motion reached target before simulated time advanced: %+v", accepted)
+	}
+
+	clk.Advance(10 * time.Second)
+	completed := c.Snapshot()
+	if completed.ActiveMove != nil || completed.State != StateIdle || completed.MachinePosition[0] != -10 {
+		t.Fatalf("completed motion snapshot = %+v", completed)
+	}
+}
+
+func TestSystemCommandRejectedDuringNormalMotion(t *testing.T) {
+	c, clk := testCtl()
+	if out := joined(c.ProcessBytes([]byte("G1 X-10 F60\n"))); out != "ok\r\n" {
+		t.Fatalf("motion response = %q", out)
+	}
+	if out := joined(c.ProcessBytes([]byte("$G\n"))); !strings.Contains(out, "[MSG:Busy]\r\nerror:9\r\n") {
+		t.Fatalf("system command during normal motion = %q, want Busy error", out)
+	}
+	clk.Advance(10 * time.Second)
+	if out := joined(c.ProcessBytes([]byte("$G\n"))); !strings.HasSuffix(out, "ok\r\n") {
+		t.Fatalf("system command after normal motion = %q, want acceptance", out)
+	}
+}
+
+func TestNormalMotionUsesSharedPlannerQueue(t *testing.T) {
+	c, clk := testCtl()
+	for _, command := range []string{"G1 X-10 F60\n", "G1 Y-10 F60\n"} {
+		if out := joined(c.ProcessBytes([]byte(command))); out != "ok\r\n" {
+			t.Fatalf("%q response = %q", command, out)
+		}
+	}
+	queued := c.Snapshot()
+	if queued.ActiveMove == nil || queued.ActiveMove.Kind != MoveNormal || queued.QueuedCommandCount != 1 {
+		t.Fatalf("queued normal motion snapshot = %+v", queued)
+	}
+	clk.Advance(20 * time.Second)
+	drained := c.Snapshot()
+	if drained.ActiveMove != nil || drained.QueuedCommandCount != 0 || drained.State != StateIdle || drained.MachinePosition != [3]float64{-10, -10, 0} {
+		t.Fatalf("drained normal motion snapshot = %+v", drained)
+	}
+}
+
 func TestSoftResetEmitsResetAlarmStartupAndClearsMotion(t *testing.T) {
 	c, _ := testCtl()
 	for _, command := range []string{"$J=G53 G90 X-10 F60\n", "$J=G53 G90 Y-10 F60\n"} {
