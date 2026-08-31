@@ -76,8 +76,26 @@ Like firmware, the mock rejects ordinary `$` system commands with a Busy error w
 
 ## Motion model
 
-- The mock does not model acceleration or deceleration.
-- Moves interpolate linearly over time.
+- Ordinary program motion intentionally implements only a narrow G-code subset:
+  `G0`/`G00`, `G1`/`G01`, modal `G90` and `G91`, the `X`/`Y`/`Z` axes, and
+  `F`. Compatible motion and distance-mode words may occur in either order, but
+  conflicting words from one modal group, malformed/non-finite values, and
+  unsupported combinations are rejected. This is not a complete GRBL or RS274
+  parser.
+- Accepted G0/G1 blocks receive `ok` immediately; simulated physical movement
+  may continue afterward. Ordinary motion enters `Run`, whereas jog motion
+  enters `Jog`.
+- Ordinary moves and jogs share the active move and planner queue model where
+  their respective admission rules permit it. Queued ordinary moves execute
+  sequentially, and their targets are planned from the preceding planner
+  endpoint.
+- Status reports expose the live linearly interpolated position. The mock does
+  not model acceleration or deceleration.
+- Ordinary-motion soft limits are checked against the resulting target before
+  the move is accepted.
+- Distance mode defaults to `G90` at startup and after reset. Standalone `G90`
+  and `G91` blocks update the mode for subsequent ordinary moves without
+  creating motion, and `$G` reports the current supported distance mode.
 - Jogs enter the `Jog` state.
 - Jog cancel materializes the current position and clears active and queued motion.
 - Continuous jogs are represented as long target moves.

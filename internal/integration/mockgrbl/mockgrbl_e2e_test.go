@@ -2129,30 +2129,26 @@ func TestDDGoProgramSystemCommandWaitsForPlannerIdleAgainstMock(t *testing.T) {
 		t.Fatalf("start barrier program: %v", err)
 	}
 
-	waitForNewMockEvents(t, m, eventsAfter, 5*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "G1X-10F600") && hasMockLogEntry(events, "response", "ok")
-	})
-	active := waitForMockState(t, m, 5*time.Second, func(state mockState) bool {
-		return state.ActiveMove != nil && state.State == "Run" && state.MachinePosition[0] > -10
-	})
-	if active.MachinePosition[0] <= -10 {
-		t.Fatalf("ordinary motion already reached target before $G barrier became pending: %+v", active)
-	}
-
 	events := waitForNewMockEvents(t, m, eventsAfter, 10*time.Second, func(events []mockLogEntry) bool {
-		return hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "M5")
+		return hasMockLogEntry(events, "motion_complete", "G1X-10F600") &&
+			hasMockLogEntry(events, "command", "$G") && hasMockLogEntry(events, "command", "M5")
 	})
-	index := func(command string) int {
+	index := func(kind, text string, after int) int {
 		for i, event := range events {
-			if event.Kind == "command" && event.Text == command {
+			if i > after && event.Kind == kind && event.Text == text {
 				return i
 			}
 		}
 		return -1
 	}
-	motion, system, following := index("G1X-10F600"), index("$G"), index("M5")
-	if motion < 0 || system <= motion || following <= system {
-		t.Fatalf("program command order invalid: motion=%d system=%d following=%d events=%+v", motion, system, following, events)
+	motion := index("command", "G1X-10F600", -1)
+	accepted := index("response", "ok", motion)
+	completed := index("motion_complete", "G1X-10F600", accepted)
+	system := index("command", "$G", completed)
+	following := index("command", "M5", system)
+	if motion < 0 || accepted < 0 || completed < 0 || system < 0 || following < 0 {
+		t.Fatalf("program causal order invalid: motion=%d accepted=%d completed=%d system=%d following=%d events=%+v",
+			motion, accepted, completed, system, following, events)
 	}
 	// Mock history records when the PTY generates a status response, not when the
 	// serial transport delivers it to DDGo. Do not infer barrier receive ordering

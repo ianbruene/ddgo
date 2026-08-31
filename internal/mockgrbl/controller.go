@@ -254,7 +254,11 @@ func (c *Controller) handleLine(raw string) []string {
 	case "$I":
 		return c.emit(c.fw.BuildInfo() + c.fw.LineEnding + c.fw.OK())
 	case "$G":
-		return c.emit("[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]" + c.fw.LineEnding + c.fw.OK())
+		distanceMode := "G91"
+		if c.distanceAbsolute {
+			distanceMode = "G90"
+		}
+		return c.emit("[GC:G0 G54 G17 G21 " + distanceMode + " G94 M5 M9 T0 F0 S0]" + c.fw.LineEnding + c.fw.OK())
 	case "$$":
 		return c.settingsResponse()
 	case "$#":
@@ -268,29 +272,30 @@ func (c *Controller) handleLine(raw string) []string {
 // program streaming: acceptance is acknowledged immediately, while the shared
 // move queue continues to report Run until physical motion completes.
 func (c *Controller) handleNormalMotion(norm string) (bool, []string) {
-	w := parseWords(norm)
-	g, hasG := w['G']
-	if !hasG || (g != 0 && g != 1) {
+	modes, words, candidate, err := parseNormalMotionBlock(norm)
+	if !candidate {
 		return false, nil
+	}
+	if err != nil {
+		return true, c.errorLine(norm, "Invalid motion", 20)
 	}
 	if c.state == StateAlarm {
 		return true, c.errorLine(norm, "Busy", 9)
 	}
 
 	abs := c.distanceAbsolute
-	if strings.Contains(norm, "G91") {
-		abs = false
-	} else if strings.Contains(norm, "G90") {
-		abs = true
+	if modes.hasDistanceMode {
+		abs = modes.absolute
+	}
+	if !modes.hasMotion {
+		c.distanceAbsolute = abs
+		return true, c.emit(c.fw.OK())
 	}
 	base := c.plannerBasePositionLocked()
 	target := base
 	axes := 0
 	for i, axis := range []byte{'X', 'Y', 'Z'} {
-		if value, ok := w[axis]; ok {
-			if math.IsNaN(value) || math.IsInf(value, 0) {
-				return true, c.errorLine(norm, "Invalid motion", 20)
-			}
+		if value, ok := words[axis]; ok {
 			axes++
 			if abs {
 				target[i] = value
@@ -302,12 +307,9 @@ func (c *Controller) handleNormalMotion(norm string) (bool, []string) {
 	if axes == 0 {
 		return true, c.errorLine(norm, "Motion axis required", 20)
 	}
-	feed := w['F']
-	if feed <= 0 {
+	feed, hasFeed := words['F']
+	if !hasFeed {
 		feed = c.mach.DefaultFeed
-	}
-	if math.IsNaN(feed) || math.IsInf(feed, 0) {
-		return true, c.errorLine(norm, "Invalid motion", 20)
 	}
 	if bad := c.limitAxis(target); bad != "" {
 		c.log("limit", bad)
@@ -325,6 +327,101 @@ func (c *Controller) handleNormalMotion(norm string) (bool, []string) {
 	}
 	c.distanceAbsolute = abs
 	return true, c.emit(c.fw.OK())
+}
+
+type normalMotionModes struct {
+	hasMotion       bool
+	motionRapid     bool
+	hasDistanceMode bool
+	absolute        bool
+}
+
+// parseNormalMotionBlock classifies every G word by the small modal subset the
+// mock supports. It deliberately does not use parseWords, whose map cannot
+// represent multiple G words or distinguish absent words from malformed ones.
+func parseNormalMotionBlock(norm string) (normalMotionModes, map[byte]float64, bool, error) {
+	type rawWord struct {
+		letter byte
+		value  string
+	}
+	var raw []rawWord
+	for i := 0; i < len(norm); {
+		if norm[i] < 'A' || norm[i] > 'Z' {
+			return normalMotionModes{}, nil, false, fmt.Errorf("text outside word")
+		}
+		letter := norm[i]
+		i++
+		start := i
+		for i < len(norm) && (norm[i] < 'A' || norm[i] > 'Z') {
+			i++
+		}
+		raw = append(raw, rawWord{letter, norm[start:i]})
+	}
+
+	var modes normalMotionModes
+	candidate := false
+	for _, word := range raw {
+		if word.letter != 'G' {
+			continue
+		}
+		g, err := strconv.ParseFloat(word.value, 64)
+		if err == nil && (g == 0 || g == 1 || g == 90 || g == 91) {
+			candidate = true
+		}
+	}
+	words := make(map[byte]float64)
+	for _, word := range raw {
+		if word.letter == 'G' {
+			g, err := strconv.ParseFloat(word.value, 64)
+			if err != nil || math.IsNaN(g) || math.IsInf(g, 0) {
+				if candidate {
+					return modes, nil, true, fmt.Errorf("invalid G word")
+				}
+				continue
+			}
+			switch g {
+			case 0, 1:
+				rapid := g == 0
+				if modes.hasMotion && modes.motionRapid != rapid {
+					return modes, nil, true, fmt.Errorf("conflicting motion modes")
+				}
+				modes.hasMotion, modes.motionRapid = true, rapid
+			case 90, 91:
+				absolute := g == 90
+				if modes.hasDistanceMode && modes.absolute != absolute {
+					return modes, nil, true, fmt.Errorf("conflicting distance modes")
+				}
+				modes.hasDistanceMode, modes.absolute = true, absolute
+			default:
+				if candidate {
+					return modes, nil, true, fmt.Errorf("unsupported G word")
+				}
+			}
+		}
+	}
+	if !candidate {
+		return modes, nil, false, nil
+	}
+	for _, word := range raw {
+		if word.letter == 'G' {
+			continue
+		}
+		if word.letter != 'X' && word.letter != 'Y' && word.letter != 'Z' && word.letter != 'F' {
+			return modes, nil, true, fmt.Errorf("unsupported word")
+		}
+		if _, duplicate := words[word.letter]; duplicate {
+			return modes, nil, true, fmt.Errorf("duplicate word")
+		}
+		value, err := strconv.ParseFloat(word.value, 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || (word.letter == 'F' && value <= 0) {
+			return modes, nil, true, fmt.Errorf("invalid word")
+		}
+		words[word.letter] = value
+	}
+	if !modes.hasMotion && len(words) != 0 {
+		return modes, nil, true, fmt.Errorf("words without motion")
+	}
+	return modes, words, true, nil
 }
 
 // parseSpindleCommand recognizes the small spindle command surface exercised by DDGo.
