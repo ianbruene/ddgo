@@ -22,6 +22,7 @@ import (
 	"github.com/ianbruene/ddgo/internal/gcode"
 	"github.com/ianbruene/ddgo/internal/grbl"
 	"github.com/ianbruene/ddgo/internal/macro"
+	"github.com/ianbruene/ddgo/internal/ports"
 	"github.com/ianbruene/ddgo/internal/transport"
 )
 
@@ -649,6 +650,30 @@ func TestMockGRBLHarnessStarts(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("serial path %q is not a symlink", m.SerialPath)
+	}
+}
+
+func TestAutoConnectStartsStatusPolling(t *testing.T) {
+	m := startMockGRBL(t)
+	lister := ports.StaticList([]ports.Info{{
+		Name: m.SerialPath, IsUSB: true, VID: "1209", PID: "DDF0", SerialNumber: "GrblDD-E2E",
+	}}, nil)
+	controller := app.NewController(transport.NewSerialTransport(), lister)
+	monitorCtx, stop := context.WithCancel(context.Background())
+	controller.StartPortMonitoring(monitorCtx)
+	t.Cleanup(func() {
+		stop()
+		controller.StopPortMonitoring()
+		if controller.Snapshot().Connected {
+			_ = controller.Disconnect()
+		}
+	})
+
+	snapshot := waitForControllerState(t, controller, 5*time.Second, func(state app.State) bool {
+		return state.Connected && state.PortName == m.SerialPath && state.LastStatusRaw != ""
+	})
+	if snapshot.MachineState != "Idle" {
+		t.Fatalf("machine state after automatic connection = %q, want Idle", snapshot.MachineState)
 	}
 }
 

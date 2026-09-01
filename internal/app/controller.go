@@ -86,6 +86,10 @@ type Controller struct {
 	mu                                      sync.RWMutex
 	transport                               transport.Transport
 	listPorts                               ports.ListFunc
+	portScanMu                              sync.Mutex
+	portMonitor                             portMonitorState
+	portMonitorInterval                     time.Duration
+	now                                     func() time.Time
 	events                                  chan Event
 	state                                   State
 	stateRevision                           StateRevision
@@ -123,6 +127,8 @@ func NewController(t transport.Transport, listPorts ports.ListFunc) *Controller 
 		events:              make(chan Event, 1024),
 		state:               State{ProgramStatus: ProgramNotLoaded},
 		statusPollInterval:  defaultStatusPollInterval,
+		portMonitorInterval: defaultPortMonitorInterval,
+		now:                 time.Now,
 		macroEngine:         macro.NewDefaultEngine(),
 		variables:           macro.NewVariableStore(),
 		contour:             macro.NewContourState(),
@@ -180,19 +186,7 @@ func (c *Controller) captureEventState() versionedState {
 }
 
 func (c *Controller) RefreshPorts(ctx context.Context) error {
-	if c.listPorts == nil {
-		err := errors.New("port lister is not configured")
-		c.emitError(err)
-		return err
-	}
-	list, err := c.listPorts(ctx)
-	if err != nil {
-		c.emitError(err)
-		return err
-	}
-	snapshot := c.captureEventState()
-	c.events <- Event{Kind: EventPortsRefreshed, When: time.Now(), Ports: clonePorts(list), State: snapshot.state, StateRevision: snapshot.revision}
-	return nil
+	return c.scanPorts(ctx, true)
 }
 
 func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) error {
@@ -283,6 +277,10 @@ func (c *Controller) Disconnect() error {
 		c.emitError(err)
 		return err
 	}
+	// Capture the physical identity before clearing State.PortName. Suppression is
+	// committed only after Close succeeds, so a rejected/failed disconnect does
+	// not alter automatic connection policy.
+	suppressed := c.connectedMachineIdentityLocked()
 	c.connectionTransition = connectionDisconnecting
 	writeDone := c.realtimeWriteDone
 	c.terminateResponseOwnerLocked(c.responseOwner, ErrTransportDisconnected)
@@ -303,6 +301,9 @@ func (c *Controller) Disconnect() error {
 
 	c.mu.Lock()
 	c.clearConnectionStateLocked()
+	if suppressed != "" {
+		c.portMonitor.suppressedIdentity = suppressed
+	}
 	c.connectionTransition = connectionStable
 	snapshot := c.captureEventStateLocked()
 	c.mu.Unlock()

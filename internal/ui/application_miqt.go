@@ -45,8 +45,11 @@ func (a *Application) Run() error {
 	a.pollTimer.OnTimeout(func() { a.drainControllerEvents() })
 	a.pollTimer.Start(50)
 
-	go func() { _ = a.controller.RefreshPorts(context.Background()) }()
+	monitorContext, stopMonitor := context.WithCancel(context.Background())
+	a.controller.StartPortMonitoring(monitorContext)
 	qt.QApplication_Exec()
+	stopMonitor()
+	a.controller.StopPortMonitoring()
 	return nil
 }
 

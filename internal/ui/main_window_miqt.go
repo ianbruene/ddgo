@@ -547,6 +547,10 @@ func (w *MainWindow) applyEvent(ev app.Event) {
 }
 
 func (w *MainWindow) populatePorts(list []ports.Info) {
+	selected := strings.TrimSpace(w.portCombo.CurrentText())
+	if state := w.controller.Snapshot(); state.Connected {
+		selected = state.PortName
+	}
 	w.portCombo.Clear()
 	names := make([]string, 0, len(list))
 	for _, p := range list {
@@ -554,7 +558,14 @@ func (w *MainWindow) populatePorts(list []ports.Info) {
 	}
 	if len(names) > 0 {
 		w.portCombo.AddItems(names)
-		w.portCombo.SetCurrentText(names[0])
+		choice := names[0]
+		for _, name := range names {
+			if name == selected {
+				choice = selected
+				break
+			}
+		}
+		w.portCombo.SetCurrentText(choice)
 	}
 }
 
