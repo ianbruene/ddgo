@@ -165,11 +165,9 @@ func (c *Controller) considerAutoConnect(ctx context.Context, list []ports.Info)
 	if blocked {
 		return
 	}
-	err := c.connect(ctx, transport.DefaultPortConfig(p.Name), false)
+	err := c.connect(ctx, transport.DefaultPortConfig(p.Name), connectOriginAutomatic)
 	c.mu.Lock()
 	if err == nil {
-		c.resetAutoRetryLocked()
-		c.portMonitor.lastAutoErrorIdentity, c.portMonitor.lastAutoError = "", ""
 		c.mu.Unlock()
 		return
 	}
@@ -203,6 +201,45 @@ func (c *Controller) portMonitorNow() time.Time {
 
 func (c *Controller) resetAutoRetryLocked() {
 	c.portMonitor.retryIdentity, c.portMonitor.retryAfter, c.portMonitor.retryStep = "", time.Time{}, 0
+}
+
+func (c *Controller) clearAutoRetryForIdentityLocked(id machineIdentity) {
+	if id != "" && c.portMonitor.retryIdentity == id {
+		c.resetAutoRetryLocked()
+	}
+}
+
+func (c *Controller) clearAutoErrorForIdentityLocked(id machineIdentity) {
+	if id != "" && c.portMonitor.lastAutoErrorIdentity == id {
+		c.portMonitor.lastAutoErrorIdentity, c.portMonitor.lastAutoError = "", ""
+	}
+}
+
+// applySuccessfulConnectionPolicyLocked clears only monitor policy belonging
+// to the physical machine whose connection was just committed.
+func (c *Controller) applySuccessfulConnectionPolicyLocked(origin connectOrigin, cfg transport.PortConfig) {
+	var id machineIdentity
+	for _, p := range c.portMonitor.lastPorts {
+		if p.Name == cfg.Name && isMachinePort(p) {
+			id = identityForPort(p)
+			break
+		}
+	}
+	if origin == connectOriginAutomatic {
+		// Automatic attempts are made only for the selected enumerated machine.
+		// Preserve their existing global successful-attempt cleanup semantics.
+		c.resetAutoRetryLocked()
+		c.portMonitor.lastAutoErrorIdentity, c.portMonitor.lastAutoError = "", ""
+		return
+	}
+	if id == "" {
+		return
+	}
+	if c.portMonitor.suppressedIdentity == id {
+		c.portMonitor.suppressedIdentity = ""
+	}
+	c.clearAutoRetryForIdentityLocked(id)
+	c.clearAutoErrorForIdentityLocked(id)
 }
 
 func (c *Controller) connectedMachineIdentityLocked() machineIdentity {

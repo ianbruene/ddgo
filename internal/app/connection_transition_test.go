@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ianbruene/ddgo/internal/grbl"
+	"github.com/ianbruene/ddgo/internal/ports"
 	"github.com/ianbruene/ddgo/internal/transport"
 )
 
@@ -296,6 +297,85 @@ func TestConnectAdmissionBlocksCommandsAndConcurrentConnect(t *testing.T) {
 	waitForState(t, c, func(state State) bool { return state.ProgramStatus == ProgramCompleted })
 	if err := c.Connect(context.Background(), transport.DefaultPortConfig("again")); !errors.Is(err, ErrAlreadyConnected) {
 		t.Fatalf("second stable Connect() error = %v, want ErrAlreadyConnected", err)
+	}
+}
+
+func TestAutomaticConnectRacingManualConnectPreservesPolicyUntilWinnerCommits(t *testing.T) {
+	tr := newBlockingOpenTransport()
+	machine := knownMachine("machine", "board-a")
+	c := NewController(tr, ports.StaticList([]ports.Info{machine}, nil))
+	c.statusPollInterval = time.Hour
+	scanDone := make(chan error, 1)
+	go func() { scanDone <- c.scanPorts(context.Background(), false) }()
+	<-tr.openStarted
+
+	c.mu.Lock()
+	id := identityForPort(machine)
+	c.portMonitor.suppressedIdentity = id
+	c.portMonitor.retryIdentity = id
+	c.portMonitor.retryAfter = time.Unix(999, 0)
+	c.portMonitor.retryStep = 2
+	c.mu.Unlock()
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig(machine.Name)); !errors.Is(err, ErrConnectionTransition) {
+		t.Fatalf("manual Connect error = %v, want ErrConnectionTransition", err)
+	}
+	c.mu.RLock()
+	suppressed, retry, step := c.portMonitor.suppressedIdentity, c.portMonitor.retryIdentity, c.portMonitor.retryStep
+	c.mu.RUnlock()
+	if suppressed != id || retry != id || step != 2 {
+		t.Fatalf("rejected manual Connect changed policy: suppression=%q retry=%q step=%d", suppressed, retry, step)
+	}
+	if opens, closes, _ := tr.counts(); opens != 1 || closes != 0 {
+		t.Fatalf("transport counts during race = opens %d closes %d", opens, closes)
+	}
+	close(tr.releaseOpen)
+	if err := <-scanDone; err != nil {
+		t.Fatal(err)
+	}
+	if !c.Snapshot().Connected {
+		t.Fatal("automatic winner did not connect")
+	}
+	if opens, _, _ := tr.counts(); opens != 1 {
+		t.Fatalf("Open calls = %d", opens)
+	}
+	// Automatic success keeps suppression intact, even though it clears retry.
+	c.mu.RLock()
+	suppressed, retry = c.portMonitor.suppressedIdentity, c.portMonitor.retryIdentity
+	c.mu.RUnlock()
+	if suppressed != id || retry != "" {
+		t.Fatalf("winner policy suppression=%q retry=%q", suppressed, retry)
+	}
+}
+
+func TestAutomaticConnectRacingManualDisconnectDoesNotCommitSuppression(t *testing.T) {
+	tr := newBlockingOpenTransport()
+	machine := knownMachine("machine", "board-a")
+	c := NewController(tr, ports.StaticList([]ports.Info{machine}, nil))
+	c.statusPollInterval = time.Hour
+	scanDone := make(chan error, 1)
+	go func() { scanDone <- c.scanPorts(context.Background(), false) }()
+	<-tr.openStarted
+	if err := c.Disconnect(); !errors.Is(err, ErrConnectionTransition) {
+		t.Fatalf("Disconnect error = %v, want ErrConnectionTransition", err)
+	}
+	c.mu.RLock()
+	suppressed := c.portMonitor.suppressedIdentity
+	c.mu.RUnlock()
+	if suppressed != "" {
+		t.Fatalf("rejected Disconnect suppression = %q", suppressed)
+	}
+	if opens, closes, _ := tr.counts(); opens != 1 || closes != 0 {
+		t.Fatalf("transport counts during race = opens %d closes %d", opens, closes)
+	}
+	close(tr.releaseOpen)
+	if err := <-scanDone; err != nil {
+		t.Fatal(err)
+	}
+	if !c.Snapshot().Connected {
+		t.Fatal("automatic connection did not commit")
+	}
+	if opens, closes, _ := tr.counts(); opens != 1 || closes != 0 {
+		t.Fatalf("final transport counts = opens %d closes %d", opens, closes)
 	}
 }
 
