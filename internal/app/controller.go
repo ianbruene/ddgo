@@ -62,6 +62,13 @@ const (
 
 type connectAttemptID uint64
 
+type connectOrigin uint8
+
+const (
+	connectOriginManual connectOrigin = iota
+	connectOriginAutomatic
+)
+
 type admissionKind uint8
 
 const (
@@ -190,12 +197,13 @@ func (c *Controller) RefreshPorts(ctx context.Context) error {
 }
 
 func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) error {
-	return c.connect(ctx, cfg, true)
+	return c.connect(ctx, cfg, connectOriginManual)
 }
 
-// connect preserves the normal connection admission path while allowing the
-// discovery loop to apply its own (deduplicated) reporting policy.
-func (c *Controller) connect(ctx context.Context, cfg transport.PortConfig, report bool) error {
+// connect preserves the normal connection admission and transport path while
+// making the policy origin of the attempt explicit.
+func (c *Controller) connect(ctx context.Context, cfg transport.PortConfig, origin connectOrigin) error {
+	report := origin == connectOriginManual
 	if cfg.Name == "" {
 		err := errors.New("port name is required")
 		if report {
@@ -251,6 +259,7 @@ func (c *Controller) connect(ctx context.Context, cfg transport.PortConfig, repo
 	c.connectionGeneration = generation
 	c.state.PortName = cfg.Name
 	c.state.LastError = ""
+	c.applySuccessfulConnectionPolicyLocked(origin, cfg)
 	c.finishConnectAttemptLocked(attempt)
 	snapshot := c.captureEventStateLocked()
 	c.startStatusPollingLocked()

@@ -130,7 +130,7 @@ func TestPortMonitorRejectsUnrelatedAndAmbiguous(t *testing.T) {
 	}
 }
 
-func TestAutoConnectBackoffAndTopologyReset(t *testing.T) {
+func TestAutoConnectRetriesAfterBackoff(t *testing.T) {
 	tr := newCountedTransport()
 	tr.SetOpenError(errors.New("not ready"))
 	now := time.Unix(100, 0)
@@ -153,6 +153,77 @@ func TestAutoConnectBackoffAndTopologyReset(t *testing.T) {
 	}
 	if !c.Snapshot().Connected || len(tr.openNames()) != 2 {
 		t.Fatalf("retry did not connect; opens=%v state=%+v", tr.openNames(), c.Snapshot())
+	}
+}
+
+func TestAutoConnectBackoffResetsWhenMachineDisappears(t *testing.T) {
+	tr := newCountedTransport()
+	tr.SetOpenError(errors.New("not ready"))
+	now := time.Unix(100, 0)
+	machine := knownMachine("a", "board-a")
+	current := []ports.Info{machine}
+	c := NewController(tr, func(context.Context) ([]ports.Info, error) { return clonePorts(current), nil })
+	c.now = func() time.Time { return now }
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current = nil
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.RLock()
+	retry := c.portMonitor.retryIdentity
+	c.mu.RUnlock()
+	if retry != "" {
+		t.Fatalf("retry identity after removal = %q", retry)
+	}
+	current = []ports.Info{machine}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tr.openNames()); got != 2 {
+		t.Fatalf("immediate reappearance opens = %d, want 2", got)
+	}
+}
+
+func TestAutoConnectBackoffDoesNotBlockDifferentIdentity(t *testing.T) {
+	tr := newCountedTransport()
+	tr.SetOpenError(errors.New("not ready"))
+	current := []ports.Info{knownMachine("a", "board-a")}
+	c := NewController(tr, func(context.Context) ([]ports.Info, error) { return clonePorts(current), nil })
+	c.now = func() time.Time { return time.Unix(100, 0) }
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current = []ports.Info{knownMachine("b", "board-b")}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := tr.openNames(); len(got) != 2 || got[1] != "b" {
+		t.Fatalf("different identity opens = %v", got)
+	}
+}
+
+func TestAutoConnectBackoffSurvivesUnrelatedTopologyChange(t *testing.T) {
+	tr := newCountedTransport()
+	tr.SetOpenError(errors.New("not ready"))
+	machine := knownMachine("a", "board-a")
+	current := []ports.Info{machine}
+	c := NewController(tr, func(context.Context) ([]ports.Info, error) { return clonePorts(current), nil })
+	c.now = func() time.Time { return time.Unix(100, 0) }
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current = append(current, ports.Info{Name: "other", IsUSB: true, VID: "1111", PID: "2222"})
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current = []ports.Info{machine}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tr.openNames()); got != 1 {
+		t.Fatalf("opens during unchanged-machine backoff = %d", got)
 	}
 }
 
@@ -186,6 +257,153 @@ func TestManualDisconnectSuppressedUntilRemoval(t *testing.T) {
 	}
 	if len(tr.openNames()) != 2 || !c.Snapshot().Connected {
 		t.Fatalf("replug opens=%v state=%+v", tr.openNames(), c.Snapshot())
+	}
+}
+
+func TestManualConnectClearsDisconnectSuppression(t *testing.T) {
+	tr := newCountedTransport()
+	machine := knownMachine("a", "board-a")
+	c := NewController(tr, ports.StaticList([]ports.Info{machine}, nil))
+	c.statusPollInterval = time.Hour
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tr.openNames()); got != 1 {
+		t.Fatalf("suppressed opens = %d", got)
+	}
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig(machine.Name)); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.RLock()
+	suppressed := c.portMonitor.suppressedIdentity
+	c.mu.RUnlock()
+	if suppressed != "" {
+		t.Fatalf("suppression after successful manual Connect = %q", suppressed)
+	}
+	tr.InjectDisconnected()
+	waitForState(t, c, func(s State) bool { return !s.Connected })
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tr.openNames()); got != 3 || !c.Snapshot().Connected {
+		t.Fatalf("reconnect opens=%d state=%+v", got, c.Snapshot())
+	}
+}
+
+func TestFailedManualConnectRetainsDisconnectSuppression(t *testing.T) {
+	tr := newCountedTransport()
+	machine := knownMachine("a", "board-a")
+	c := NewController(tr, ports.StaticList([]ports.Info{machine}, nil))
+	c.statusPollInterval = time.Hour
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	tr.SetOpenError(errors.New("manual failure"))
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig(machine.Name)); err == nil {
+		t.Fatal("manual Connect succeeded")
+	}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.RLock()
+	suppressed := c.portMonitor.suppressedIdentity
+	c.mu.RUnlock()
+	if suppressed != identityForPort(machine) {
+		t.Fatalf("suppression = %q", suppressed)
+	}
+	if got := len(tr.openNames()); got != 2 {
+		t.Fatalf("automatic reconnect attempted; opens=%d", got)
+	}
+}
+
+func TestManualConnectClearsAutomaticBackoff(t *testing.T) {
+	tr := newCountedTransport()
+	tr.SetOpenError(errors.New("automatic failure"))
+	now := time.Unix(100, 0)
+	machine := knownMachine("a", "board-a")
+	c := NewController(tr, ports.StaticList([]ports.Info{machine}, nil))
+	c.statusPollInterval = time.Hour
+	c.now = func() time.Time { return now }
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tr.SetOpenError(nil)
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig(machine.Name)); err != nil {
+		t.Fatal(err)
+	}
+	tr.InjectDisconnected()
+	waitForState(t, c, func(s State) bool { return !s.Connected })
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tr.openNames()); got != 3 || !c.Snapshot().Connected {
+		t.Fatalf("immediate reconnect opens=%d state=%+v", got, c.Snapshot())
+	}
+}
+
+func TestManualConnectClearsAutomaticErrorDeduplication(t *testing.T) {
+	tr := newCountedTransport()
+	wantErr := errors.New("same automatic failure")
+	tr.SetOpenError(wantErr)
+	now := time.Unix(100, 0)
+	machine := knownMachine("a", "board-a")
+	c := NewController(tr, ports.StaticList([]ports.Info{machine}, nil))
+	c.statusPollInterval = time.Hour
+	c.now = func() time.Time { return now }
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := countEventsContaining(c.Events(), wantErr.Error()); got != 1 {
+		t.Fatalf("first errors = %d", got)
+	}
+	tr.SetOpenError(nil)
+	if err := c.Connect(context.Background(), transport.DefaultPortConfig(machine.Name)); err != nil {
+		t.Fatal(err)
+	}
+	tr.InjectDisconnected()
+	waitForState(t, c, func(s State) bool { return !s.Connected })
+	tr.SetOpenError(wantErr)
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := countEventsContaining(c.Events(), wantErr.Error()); got != 1 {
+		t.Fatalf("second errors = %d, want 1", got)
+	}
+}
+
+func TestAutomaticEnumerationErrorsDeduplicateUntilSuccess(t *testing.T) {
+	wantErr := errors.New("enumeration failed")
+	listErr := wantErr
+	c := NewController(newCountedTransport(), func(context.Context) ([]ports.Info, error) { return nil, listErr })
+	for range 3 {
+		_ = c.scanPorts(context.Background(), false)
+	}
+	if got := countEventsContaining(c.Events(), wantErr.Error()); got != 1 {
+		t.Fatalf("automatic errors = %d", got)
+	}
+	if err := c.RefreshPorts(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("manual RefreshPorts error = %v", err)
+	}
+	if got := countEventsContaining(c.Events(), wantErr.Error()); got != 1 {
+		t.Fatalf("manual errors = %d", got)
+	}
+	listErr = nil
+	if err := c.scanPorts(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	listErr = wantErr
+	_ = c.scanPorts(context.Background(), false)
+	if got := countEventsContaining(c.Events(), wantErr.Error()); got != 1 {
+		t.Fatalf("post-success errors = %d", got)
 	}
 }
 
