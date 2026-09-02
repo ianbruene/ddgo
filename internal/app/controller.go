@@ -190,15 +190,25 @@ func (c *Controller) RefreshPorts(ctx context.Context) error {
 }
 
 func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) error {
+	return c.connect(ctx, cfg, true)
+}
+
+// connect preserves the normal connection admission path while allowing the
+// discovery loop to apply its own (deduplicated) reporting policy.
+func (c *Controller) connect(ctx context.Context, cfg transport.PortConfig, report bool) error {
 	if cfg.Name == "" {
 		err := errors.New("port name is required")
-		c.emitError(err)
+		if report {
+			c.emitError(err)
+		}
 		return err
 	}
 	c.mu.Lock()
 	if err := c.admissionErrorLocked(admissionConnect); err != nil {
 		c.mu.Unlock()
-		c.emitError(err)
+		if report {
+			c.emitError(err)
+		}
 		return err
 	}
 	attempt := c.beginConnectAttemptLocked()
@@ -209,7 +219,9 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 	if c.connectionTransition != connectionConnecting || c.activeConnectAttempt != attempt {
 		c.finishConnectAttemptLocked(attempt)
 		c.mu.Unlock()
-		c.emitError(ErrConnectionInvariant)
+		if report {
+			c.emitError(ErrConnectionInvariant)
+		}
 		return ErrConnectionInvariant
 	}
 	if openErr == nil && generation == 0 {
@@ -229,7 +241,10 @@ func (c *Controller) Connect(ctx context.Context, cfg transport.PortConfig) erro
 		}
 		c.finishConnectAttemptLocked(attempt)
 		c.mu.Unlock()
-		c.emitError(err)
+		err = serialOpenError(cfg.Name, err)
+		if report {
+			c.emitError(err)
+		}
 		return err
 	}
 	c.state.Connected = true

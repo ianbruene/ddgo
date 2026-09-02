@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,14 +20,17 @@ var autoConnectRetryDelays = [...]time.Duration{time.Second, 2 * time.Second, 5 
 type machineIdentity string
 
 type portMonitorState struct {
-	lastPorts          []ports.Info
-	hasScanned         bool
-	suppressedIdentity machineIdentity
-	retryIdentity      machineIdentity
-	retryAfter         time.Time
-	retryStep          int
-	cancel             context.CancelFunc
-	done               chan struct{}
+	lastPorts             []ports.Info
+	hasScanned            bool
+	suppressedIdentity    machineIdentity
+	retryIdentity         machineIdentity
+	retryAfter            time.Time
+	retryStep             int
+	lastAutoErrorIdentity machineIdentity
+	lastAutoError         string
+	lastEnumerationError  string
+	cancel                context.CancelFunc
+	done                  chan struct{}
 }
 
 // StartPortMonitoring starts the controller's single discovery lifecycle. It
@@ -103,17 +108,32 @@ func (c *Controller) scanPorts(ctx context.Context, explicit bool) error {
 	list, err := c.listPorts(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			c.emitError(err)
+			c.mu.Lock()
+			report := explicit || c.portMonitor.lastEnumerationError != err.Error()
+			c.portMonitor.lastEnumerationError = err.Error()
+			c.mu.Unlock()
+			if report {
+				c.emitError(err)
+			}
 		}
 		return err
 	}
 	list = clonePorts(list)
 	c.mu.Lock()
+	c.portMonitor.lastEnumerationError = ""
 	changed := !c.portMonitor.hasScanned || !samePortTopology(c.portMonitor.lastPorts, list)
+	previous := clonePorts(c.portMonitor.lastPorts)
 	if changed {
 		c.portMonitor.lastPorts = clonePorts(list)
 		c.portMonitor.hasScanned = true
+	}
+	oldCandidate, oldOK := selectMachinePort(previous)
+	newCandidate, newOK := selectMachinePort(list)
+	if oldOK && (!newOK || identityForPort(oldCandidate) != identityForPort(newCandidate)) {
 		c.resetAutoRetryLocked()
+	}
+	if c.portMonitor.lastAutoErrorIdentity != "" && !containsMachineIdentity(list, c.portMonitor.lastAutoErrorIdentity) {
+		c.portMonitor.lastAutoErrorIdentity, c.portMonitor.lastAutoError = "", ""
 	}
 	if c.portMonitor.suppressedIdentity != "" && !containsMachineIdentity(list, c.portMonitor.suppressedIdentity) {
 		c.portMonitor.suppressedIdentity = ""
@@ -125,7 +145,7 @@ func (c *Controller) scanPorts(ctx context.Context, explicit bool) error {
 	}
 	c.mu.Unlock()
 	if emit {
-		c.events <- Event{Kind: EventPortsRefreshed, When: c.portMonitorNow(), Ports: clonePorts(list), State: snapshot.state, StateRevision: snapshot.revision}
+		c.events <- Event{Kind: EventPortsRefreshed, When: c.portMonitorNow(), Text: formatPortChanges(previous, list, explicit), Ports: clonePorts(list), State: snapshot.state, StateRevision: snapshot.revision}
 	}
 	c.considerAutoConnect(ctx, list)
 	return nil
@@ -145,16 +165,20 @@ func (c *Controller) considerAutoConnect(ctx context.Context, list []ports.Info)
 	if blocked {
 		return
 	}
-	err := c.Connect(ctx, transport.DefaultPortConfig(p.Name))
+	err := c.connect(ctx, transport.DefaultPortConfig(p.Name), false)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err == nil {
 		c.resetAutoRetryLocked()
+		c.portMonitor.lastAutoErrorIdentity, c.portMonitor.lastAutoError = "", ""
+		c.mu.Unlock()
 		return
 	}
 	if errors.Is(err, ErrAlreadyConnected) || errors.Is(err, ErrConnectionTransition) || ctx.Err() != nil {
+		c.mu.Unlock()
 		return
 	}
+	report := c.portMonitor.lastAutoErrorIdentity != id || c.portMonitor.lastAutoError != err.Error()
+	c.portMonitor.lastAutoErrorIdentity, c.portMonitor.lastAutoError = id, err.Error()
 	if c.portMonitor.retryIdentity != id {
 		c.portMonitor.retryStep = 0
 	}
@@ -163,6 +187,10 @@ func (c *Controller) considerAutoConnect(ctx context.Context, list []ports.Info)
 	c.portMonitor.retryAfter = c.portMonitorNow().Add(delay)
 	if c.portMonitor.retryStep < len(autoConnectRetryDelays)-1 {
 		c.portMonitor.retryStep++
+	}
+	c.mu.Unlock()
+	if report {
+		c.emitError(err)
 	}
 }
 
@@ -199,14 +227,11 @@ func selectMachinePort(list []ports.Info) (ports.Info, bool) {
 	return found, n == 1
 }
 
-// GrblDD firmware identifies itself through the USB serial-number descriptor.
-// Merely being USB (or the sole serial port) is intentionally insufficient.
+// Production GrblDD controller hardware tested on Linux is the Arduino Due
+// native USB port (Arduino VID 2341, PID 003e). Its serial descriptor is not
+// reliably populated, so VID/PID are the positive classification fields.
 func isMachinePort(p ports.Info) bool {
-	if !p.IsUSB {
-		return false
-	}
-	s := strings.ToLower(strings.TrimSpace(p.SerialNumber))
-	return s == "grbldd" || strings.HasPrefix(s, "grbldd-")
+	return p.IsUSB && strings.EqualFold(strings.TrimSpace(p.VID), "2341") && strings.EqualFold(strings.TrimSpace(p.PID), "003e")
 }
 
 func identityForPort(p ports.Info) machineIdentity {
@@ -214,7 +239,36 @@ func identityForPort(p ports.Info) machineIdentity {
 	if serial != "" {
 		return machineIdentity("usb:" + strings.ToLower(p.VID) + ":" + strings.ToLower(p.PID) + ":" + serial)
 	}
+	if p.IsUSB && strings.TrimSpace(p.VID) != "" && strings.TrimSpace(p.PID) != "" {
+		return machineIdentity("usb:" + strings.ToLower(strings.TrimSpace(p.VID)) + ":" + strings.ToLower(strings.TrimSpace(p.PID)))
+	}
 	return machineIdentity("path:" + p.Name)
+}
+
+func serialOpenError(name string, err error) error {
+	if err != nil && (errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrExist) == false && strings.Contains(strings.ToLower(err.Error()), "permission denied")) {
+		return fmt.Errorf("serial port %s was found but DDGo does not have permission to open it; check Linux serial-device permissions or dialout-group membership: %w", name, err)
+	}
+	return err
+}
+
+func formatPortChanges(old, current []ports.Info, explicit bool) string {
+	oldByName := make(map[string]ports.Info, len(old))
+	for _, p := range old {
+		oldByName[p.Name] = p
+	}
+	lines := make([]string, 0)
+	for _, p := range current {
+		if prior, ok := oldByName[p.Name]; explicit || !ok || !samePortTopology([]ports.Info{prior}, []ports.Info{p}) {
+			lines = append(lines, fmt.Sprintf("port detected: %s USB=%t VID=%s PID=%s Serial=%q", p.Name, p.IsUSB, p.VID, p.PID, p.SerialNumber))
+		}
+		delete(oldByName, p.Name)
+	}
+	for name := range oldByName {
+		lines = append(lines, "port removed: "+name)
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
 }
 
 func containsMachineIdentity(list []ports.Info, id machineIdentity) bool {

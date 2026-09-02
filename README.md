@@ -42,6 +42,7 @@ DDGo is a Go-based GRBL-style CNC controller/operator UI. The repository is orga
 - `docs/architecture.md`: current architecture notes for contributors.
 - `docs/macros.md`: macro framework status, runtime capabilities, limitations, and planned order.
 - `docs/mockgrbl.md`: mock controller usage, debug API, test hooks, and integration-test notes.
+- `docs/linux-serial.md`: persistent Linux permissions and controller enumeration diagnostics.
 
 ## Build tags
 
