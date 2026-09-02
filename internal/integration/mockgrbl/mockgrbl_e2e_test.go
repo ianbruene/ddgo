@@ -656,7 +656,7 @@ func TestMockGRBLHarnessStarts(t *testing.T) {
 func TestAutoConnectStartsStatusPolling(t *testing.T) {
 	m := startMockGRBL(t)
 	lister := ports.StaticList([]ports.Info{{
-		Name: m.SerialPath, IsUSB: true, VID: "1209", PID: "DDF0", SerialNumber: "GrblDD-E2E",
+		Name: m.SerialPath, IsUSB: true, VID: "2341", PID: "003e",
 	}}, nil)
 	controller := app.NewController(transport.NewSerialTransport(), lister)
 	monitorCtx, stop := context.WithCancel(context.Background())

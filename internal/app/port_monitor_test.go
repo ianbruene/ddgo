@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +14,10 @@ import (
 )
 
 func knownMachine(name, serial string) ports.Info {
-	return ports.Info{Name: name, IsUSB: true, VID: "1209", PID: "DDF0", SerialNumber: serial}
+	// The tested production controller is an Arduino Due native USB device.
+	// Linux does not reliably populate SerialNumber, so classification uses its
+	// verified 2341:003e VID/PID; serial remains useful only for identity tests.
+	return ports.Info{Name: name, IsUSB: true, VID: "2341", PID: "003e", SerialNumber: serial}
 }
 
 type countedTransport struct {
@@ -50,7 +55,8 @@ func TestSelectMachinePort(t *testing.T) {
 		{"machine", []ports.Info{m1}, true, m1.Name},
 		{"machine and unrelated", []ports.Info{unrelated, m1}, true, m1.Name},
 		{"ambiguous serials", []ports.Info{m1, m2}, false, ""},
-		{"missing serial", []ports.Info{{Name: "/dev/a", IsUSB: true, VID: "1209", PID: "DDF0"}}, false, ""},
+		{"missing serial", []ports.Info{{Name: "/dev/a", IsUSB: true, VID: "2341", PID: "003e"}}, true, "/dev/a"},
+		{"normalized metadata", []ports.Info{{Name: "/dev/a", IsUSB: true, VID: " 2341 ", PID: "003E"}}, true, "/dev/a"},
 		{"non USB", []ports.Info{{Name: "/dev/a", SerialNumber: "GrblDD"}}, false, ""},
 	}
 	for _, tt := range tests {
@@ -180,6 +186,98 @@ func TestManualDisconnectSuppressedUntilRemoval(t *testing.T) {
 	}
 	if len(tr.openNames()) != 2 || !c.Snapshot().Connected {
 		t.Fatalf("replug opens=%v state=%+v", tr.openNames(), c.Snapshot())
+	}
+}
+
+func TestManualDisconnectSuppressionSurvivesPathChangeAfterRemoval(t *testing.T) {
+	tr := newCountedTransport()
+	current := []ports.Info{knownMachine("/dev/ttyACM0", "stable-board-1")}
+	c := NewController(tr, func(context.Context) ([]ports.Info, error) { return clonePorts(current), nil })
+	c.statusPollInterval = time.Hour
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.openNames()) != 1 {
+		t.Fatalf("reconnected while suppressed: %v", tr.openNames())
+	}
+	current = nil
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current = []ports.Info{knownMachine("/dev/ttyACM1", "stable-board-1")}
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := tr.openNames(); len(got) != 2 || got[1] != "/dev/ttyACM1" {
+		t.Fatalf("path-change opens = %v", got)
+	}
+}
+
+func TestAutomaticPermissionErrorIsActionableDeduplicatedAndRetried(t *testing.T) {
+	tr := newCountedTransport()
+	tr.SetOpenError(&os.PathError{Op: "open", Path: "/dev/ttyACM0", Err: os.ErrPermission})
+	now := time.Unix(100, 0)
+	c := NewController(tr, ports.StaticList([]ports.Info{knownMachine("/dev/ttyACM0", "")}, nil))
+	c.now = func() time.Time { return now }
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.Snapshot().Connected {
+		t.Fatal("permission-denied open connected")
+	}
+	if got := countEventsContaining(c.Events(), "does not have permission"); got != 1 {
+		t.Fatalf("permission events = %d", got)
+	}
+	now = now.Add(time.Second)
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.openNames()) != 2 {
+		t.Fatalf("permission failure was not retried: %v", tr.openNames())
+	}
+	if got := countEventsContaining(c.Events(), "does not have permission"); got != 0 {
+		t.Fatalf("duplicate permission events = %d", got)
+	}
+	now = now.Add(2 * time.Second)
+	tr.SetOpenError(nil)
+	if err := c.RefreshPorts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Snapshot().Connected {
+		t.Fatal("did not connect after permissions became available")
+	}
+}
+
+func TestManualConnectReportsPermissionFailureImmediately(t *testing.T) {
+	tr := newCountedTransport()
+	tr.SetOpenError(os.ErrPermission)
+	c := NewController(tr, ports.StaticList(nil, nil))
+	err := c.Connect(context.Background(), transport.DefaultPortConfig("/dev/ttyACM0"))
+	if err == nil || !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "dialout-group membership") {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if got := countEventsContaining(c.Events(), "does not have permission"); got != 1 {
+		t.Fatalf("manual permission events = %d", got)
+	}
+}
+
+func countEventsContaining(events <-chan Event, text string) int {
+	n := 0
+	for {
+		select {
+		case ev := <-events:
+			if strings.Contains(ev.Text, text) {
+				n++
+			}
+		default:
+			return n
+		}
 	}
 }
 

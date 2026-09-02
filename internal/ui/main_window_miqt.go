@@ -538,6 +538,11 @@ func (w *MainWindow) applyEvent(ev app.Event) {
 	case app.EventError:
 		w.appendConsole("ERR", ev.Text)
 	case app.EventPortsRefreshed:
+		for _, line := range strings.Split(ev.Text, "\n") {
+			if line != "" {
+				w.appendConsole("SYS", line)
+			}
+		}
 		w.populatePorts(ev.Ports)
 	case app.EventStateChanged:
 		if ev.Text != "" {
